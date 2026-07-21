@@ -8,16 +8,19 @@ Wants=network-online.target
 #   LOCAL_AGENT, PEER_AGENT, EDGE_BEARER, LOCAL_TOKEN, CERT_FILE, KEY_FILE
 #   optional: DOMAIN, STATE_DIR, ENDPOINT_URL, GRANT_TYPES, GRANT_MAX_PER_DAY,
 #             GRANT_THREAD_DEPTH, GRANT_EXPIRES
+# Runs as a fixed system user (NOT DynamicUser) so it can read the TLS private key, which must be
+# group-readable by that user. With Let's Encrypt, copy the live cert into a service-readable dir
+# via a certbot deploy-hook (the live/ + archive/ trees are root-only) — see mailbox/README.md.
+User=koine
+Group=koine
 EnvironmentFile=/etc/koine-mailbox/mailbox.env
 ExecStart=/usr/bin/python3 /opt/koine/mailbox/mailbox.py
 Restart=on-failure
 RestartSec=3
-# hardening: the mailbox needs only its state dir + cert dir
-DynamicUser=yes
-StateDirectory=koine-mailbox
 ProtectSystem=strict
-ProtectHome=yes
+ReadWritePaths=/var/lib/koine-mailbox
 ReadOnlyPaths=/etc/koine-mailbox
+ProtectHome=yes
 NoNewPrivileges=yes
 
 [Install]

@@ -10,10 +10,14 @@ command -v python3 >/dev/null || { echo "python3 required"; exit 1; }
 [ -f "$ENVFILE" ] || { echo "missing $ENVFILE — create it first (see README.md)"; exit 1; }
 chmod 600 "$ENVFILE"
 
+id koine >/dev/null 2>&1 || useradd --system --home /var/lib/koine-mailbox --shell /usr/sbin/nologin koine
+install -d -m 0750 -o koine -g koine /var/lib/koine-mailbox
 install -d -m 0755 /opt/koine/mailbox
-install -m 0755 "$HERE/mailbox.py" /opt/koine/mailbox/mailbox.py
-install -m 0644 "$HERE/langfuse_emit.py" /opt/koine/mailbox/langfuse_emit.py
+[ "$HERE" = /opt/koine/mailbox ] || install -m 0755 "$HERE/mailbox.py" /opt/koine/mailbox/mailbox.py
+[ "$HERE" = /opt/koine/mailbox ] || install -m 0644 "$HERE/langfuse_emit.py" /opt/koine/mailbox/langfuse_emit.py
 install -m 0644 "$HERE/koine-mailbox.service" /etc/systemd/system/koine-mailbox.service
+# CERT_FILE/KEY_FILE in mailbox.env must be readable by the koine user (root:koine 640). With
+# Let's Encrypt, copy the live cert into a service dir via a renewal deploy-hook (see README).
 
 systemctl daemon-reload
 systemctl enable --now koine-mailbox
