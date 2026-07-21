@@ -1,0 +1,75 @@
+# SYSTEM unit (install to /etc/systemd/system/) for the UNPRIVILEGED, sandboxed PEER answer-daemon.
+# Phase B of docs/A2A_HARDENING_PLAN.md — closes the read-exfil gap: this daemon runs as a
+# dedicated user with no Vault token, no SSH keys, no docker group and a curated read-only workdir,
+# so even a fully jailbroken answerer's Read tool hits kernel EACCES on every credential.
+#
+# Requires (root, one-time bootstrap — see the plan doc):
+#   - user `atlas-peer` (agent-host) / `genie-peer` (peer-host): system user, no login shell, not in
+#     docker/sudo, own home under /var/lib/agent-peer.
+#   - /etc/agent-peer/peer.env  (root:atlas-peer 0640): AUTH_TOKEN=<peer inbound bearer> and
+#     ANTHROPIC_API_KEY=<dedicated key — NOT the account subscription; the peer user can't read
+#     ~/.claude by design>. Both are the peer daemon's blast radius; neither has Vault/lab reach.
+#   - curated context staged read-only at /var/lib/agent-peer/context/ (peer-context/CLAUDE.md
+#     plus a read-only copy of HOMELAB.md).
+#   - the native `claude` binary COPIED into /var/lib/agent-peer/app/claude (self-contained; the
+#     peer user can't reach /home under ProtectHome=true).
+[Unit]
+Description=A2A peer answer-endpoint (unprivileged, sandboxed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atlas-peer
+Group=atlas-peer
+# --- identity + behavior (non-secret) ---
+Environment=AGENT_NAME=atlas
+Environment=WORKDIR=/var/lib/agent-peer/context
+Environment=CLAUDE_BIN=/var/lib/agent-peer/app/claude
+# Peer daemon on :8093 — the human/control channel stays on the existing :8090 daemon UNTOUCHED
+# (safer cutover: only the gateway's async A2A route moves to :8093, the bridge never changes).
+Environment=ENDPOINT_BIND=0.0.0.0:8093
+Environment=MODEL=sonnet
+Environment=ANSWER_TIMEOUT=180
+Environment=MAX_CONCURRENCY=2
+# Peer daemon: refuse the human control channel outright; no human-permission mode ever.
+Environment=REFUSE_HUMAN_CHANNEL=1
+# HOME points at the writable state dir so the native claude binary can write its own config
+# (~/.claude) under the sandbox — the rest of the fs is read-only (ProtectSystem=strict).
+Environment=HOME=/var/lib/agent-peer/state
+# Inbound bearer + the dedicated ANTHROPIC_API_KEY (root-provisioned, 0640, peer-readable only).
+EnvironmentFile=/etc/agent-peer/peer.env
+# STATE_DIR must be writable by the peer user for its own audit/ledger.
+Environment=STATE_DIR=/var/lib/agent-peer/state
+# AUTH_TOKEN + ANTHROPIC_API_KEY come from the EnvironmentFile; endpoint.py reads AUTH_TOKEN from
+# env and the claude subprocess inherits ANTHROPIC_API_KEY — no Vault-reading run.sh needed here.
+ExecStart=/usr/bin/python3 /var/lib/agent-peer/app/endpoint.py
+
+# ---------------- sandbox (the structural control) ----------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+# only its own state dir is writable
+ReadWritePaths=/var/lib/agent-peer/state
+PrivateTmp=true
+PrivateDevices=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

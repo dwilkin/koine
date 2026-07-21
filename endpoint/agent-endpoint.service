@@ -1,0 +1,39 @@
+[Unit]
+Description=Agent answer-endpoint (Atlas <-> Genie A2A messaging)
+Documentation=https://github.com/dwilkin/nucleus (agent-endpoint/README.md)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- non-secret config; the bearer token is read from Vault by run.sh, never here ---
+# agent-host / Atlas values. On peer-host / Genie, override:
+#   AGENT_NAME=genie  WORKDIR=/home/genie  CLAUDE_BIN=/home/genie/.local/bin/claude
+Environment=AGENT_NAME=atlas
+Environment=WORKDIR=/home/claude/lab
+Environment=CLAUDE_BIN=/home/claude/.local/bin/claude
+Environment=ENDPOINT_BIND=0.0.0.0:8090
+Environment=MODEL=sonnet
+# Telegram/human-channel answers get the smart model (Darian's call 2026-07-05: chat
+# should feel like a real conversation); peer A2A stays on sonnet for cost.
+Environment=MODEL_HUMAN=opus
+Environment=ANSWER_TIMEOUT=180
+Environment=ANSWER_TIMEOUT_HUMAN=300
+# Telegram-execution parity (Darian 2026-07-05): the human channel is a real control
+# channel — live-session permission mode; guard hooks stay the hard floor; confirm-gated
+# work still waits for the human's in-chat approval via the pending-actions ledger.
+Environment=PERMISSION_MODE_HUMAN=bypassPermissions
+Environment=MAX_CONCURRENCY=2
+# Phase A hardening (2026-07-06): peer-path security alerts (redaction/tripwire hits) go to the
+# human via this host's notify helper. agent-host value below; on peer-host override with
+#   ALERT_CMD=/home/genie/agent-notify/notify-marie.py
+# ALERT_CMD is DOMAIN config — point at your domain's notify helper
+Environment=ALERT_CMD=/home/claude/lab/scripts/notify-darian.sh
+ExecStart=/home/claude/koine/endpoint/run.sh
+Restart=on-failure
+RestartSec=5
+# hardening (best-effort for a --user service)
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
