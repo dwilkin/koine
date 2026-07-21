@@ -4,15 +4,21 @@ OUR gateway (SPEC.md §8 asymmetric transport: a domain that accepts no inbound,
 dials out and polls). One poller instance per federated peer (PEER_AGENT), each pointed at that
 peer's mailbox.
 
-Loop: GET {MAILBOX}/outbox?wait=25 (bearer, pinned self-signed cert) -> for each envelope, force
-from=PEER_AGENT (structural identity — NEVER trust the remote box's claimed `from`; this is what
-prevents a peer from impersonating another agent), refuse any target but LOCAL_AGENT (the only
-granted edge), POST to the gateway /message (bootstrap bearer), then POST the gateway's full reply
-back to {MAILBOX}/reply.
+Loop: GET {MAILBOX}{POLL_PATH}?wait=25 (bearer; pinned cert if self-signed) -> for each envelope,
+force from=PEER_AGENT (structural identity — NEVER trust the remote box's claimed `from`; this is
+what prevents a peer from impersonating another agent), refuse any target but LOCAL_AGENT (the
+only granted edge), POST to the gateway /message (bootstrap bearer), then POST the gateway's full
+reply back to {MAILBOX}/reply.
+
+POLL_PATH selects the topology, the job is identical ("collect messages addressed to me"):
+  /outbox (default) — the peer SELF-HOSTS its mailbox (proxy mode); we drain its outbound queue.
+  /inbox            — a NEUTRAL relay hosts the edge (relay mode); we drain our own inbox there,
+                      authenticated by OUR per-agent token.
 
 The gateway still enforces the grant (types/rate/expiry) — this poller is transport, not policy.
-Env: MAILBOX_URL, MAILBOX_TOKEN, MAILBOX_CA, GATEWAY_URL, GW_BEARER_TOKEN,
-     PEER_AGENT (required — the peer whose mailbox this is), LOCAL_AGENT (default "atlas").
+Env: MAILBOX_URL, MAILBOX_TOKEN, GATEWAY_URL, GW_BEARER_TOKEN,
+     PEER_AGENT (required — the edge's remote peer), LOCAL_AGENT (default "atlas"),
+     POLL_PATH (default "/outbox"), MAILBOX_CA (optional — omit for a publicly-trusted cert).
 """
 import json
 import os
@@ -23,13 +29,15 @@ import urllib.request
 
 MAILBOX_URL = os.environ["MAILBOX_URL"].rstrip("/")
 MAILBOX_TOKEN = os.environ["MAILBOX_TOKEN"].strip()
-MAILBOX_CA = os.environ["MAILBOX_CA"]
+MAILBOX_CA = os.environ.get("MAILBOX_CA", "").strip()
+POLL_PATH = os.environ.get("POLL_PATH", "/outbox").strip()
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://agent-gateway:8095").rstrip("/")
 GW_BEARER_TOKEN = os.environ["GW_BEARER_TOKEN"].strip()
 PEER_AGENT = os.environ["PEER_AGENT"].strip()          # whose mailbox this is — the forced `from`
 LOCAL_AGENT = os.environ.get("LOCAL_AGENT", "atlas").strip()
 
-CTX = ssl.create_default_context(cafile=MAILBOX_CA)
+CTX = ssl.create_default_context(cafile=MAILBOX_CA) if MAILBOX_CA \
+    else ssl.create_default_context()
 
 
 def _req(url, body=None, bearer="", ctx=None, timeout=35):
@@ -64,11 +72,11 @@ def handle(env):
 
 
 def main():
-    print(f"a2a-poller: {MAILBOX_URL} -> {GATEWAY_URL}", flush=True)
+    print(f"koine-poller: {MAILBOX_URL}{POLL_PATH} -> {GATEWAY_URL}", flush=True)
     backoff = 1
     while True:
         try:
-            out = _req(MAILBOX_URL + "/outbox?wait=25", bearer=MAILBOX_TOKEN, ctx=CTX, timeout=40)
+            out = _req(MAILBOX_URL + POLL_PATH + "?wait=25", bearer=MAILBOX_TOKEN, ctx=CTX, timeout=40)
             backoff = 1
             for env in out.get("envelopes", []):
                 try:

@@ -6,18 +6,31 @@ connection hosts a mailbox; a domain that cannot (home network, employer network
 polling OUTBOUND — so neither side needs to open a hole it doesn't want to. A publicly-reachable
 mailbox is the norm; tunnels are the exception.
 
-This is the SINGLE-EDGE reference server (one local agent <-> one remote peer). A multi-tenant
-service (koine.network) wraps this same core with accounts, many queues, and a directory — but the
-per-edge contract below is identical, so anything proven here is proven there.
+This is the SINGLE-EDGE reference server (exactly two parties). Two modes (env MODE):
 
-Public TLS side (:8443, bearer EDGE_BEARER — a publicly-trusted cert needs no pinning):
-  POST /ask            remote gateway -> proxied to the LOCAL answer-endpoint  (peer -> us)
-  GET  /outbox?wait=N  long-poll queued envelopes                             (us -> peer)
-  POST /reply          the peer's poller returns our gateway's reply object
-  GET  /health         open (no auth; leaks only liveness + queue depth + grant-expiry)
-Local side (127.0.0.1:8091, bearer LOCAL_TOKEN):
-  POST /message        our own ask_peer submits here (gateway /message contract); blocks
-                       until the reply arrives via POST /reply (or times out).
+MODE=proxy (default) — the co-located mode: this box also hosts the LOCAL agent's answerer.
+  Public TLS side (:8443, bearer EDGE_BEARER — a publicly-trusted cert needs no pinning):
+    POST /ask            remote gateway -> proxied to the LOCAL answer-endpoint  (peer -> us)
+    GET  /outbox?wait=N  long-poll queued envelopes                             (us -> peer)
+    POST /reply          the peer's poller returns our gateway's reply object
+    GET  /health         open (no auth; leaks only liveness + queue depth + grant-expiry)
+  Local side (127.0.0.1:8091, bearer LOCAL_TOKEN):
+    POST /message        our own ask_peer submits here (gateway /message contract); blocks
+                         until the reply arrives via POST /reply (or times out).
+
+MODE=relay — a NEUTRAL host (the koine.network model): neither agent is on the box; the mailbox
+  is a pure two-queue store-and-forward. Per-agent tokens (TOKEN_A/TOKEN_B) are structural
+  identity — `from` is derived from which token authenticated, never from the body.
+  Public TLS side only:
+    POST /ask            sender submits; grant-checked; queued to the OTHER agent's inbox.
+                         `question` BLOCKS until the recipient replies (sender sees an ordinary
+                         synchronous call); `notification` returns 202 immediately (recipient
+                         may be offline — that asymmetry is the point of a mailbox).
+    GET  /inbox?wait=N   recipient long-polls messages addressed to IT (its own token)
+    POST /reply          recipient returns its reply for a message id (only the recipient may)
+    GET  /health         open (mode, per-agent inbox depths, grant expiry)
+  A multi-tenant service (koine.network) wraps THIS mode with accounts + many queues + a
+  directory; the per-edge contract is identical, so anything proven here is proven there.
 
 Defense in depth: the RECEIVING edge (/ask) re-enforces the grant HERE (type allow-list, daily
 cap, thread-depth, dedup) — not only on the peer's gateway. Keep GRANT_* in lockstep with the
@@ -60,10 +73,27 @@ except Exception:  # pragma: no cover
         def log_exchange(**_):
             return None
 
-LOCAL_AGENT = os.environ["LOCAL_AGENT"].strip()
-PEER_AGENT = os.environ["PEER_AGENT"].strip()
-EDGE_BEARER = os.environ["EDGE_BEARER"].strip()
-LOCAL_TOKEN = os.environ["LOCAL_TOKEN"].strip()
+# MODE:
+#   proxy (default) — the original co-located mode: this box also hosts the LOCAL agent's
+#     answerer; /ask proxies to it, /outbox holds our outbound. For self-hosters.
+#   relay — a NEUTRAL host (koine.network): neither agent is on the box. Two queues, two
+#     per-agent tokens (structural identity — `from` is derived from which token authenticated,
+#     never from the body). POST /ask blocks for questions, 202-queues notifications;
+#     each side long-polls GET /inbox for messages addressed to it and POSTs /reply.
+MODE = os.environ.get("MODE", "proxy").strip().lower()
+
+if MODE == "relay":
+    AGENT_A = os.environ["AGENT_A"].strip()
+    TOKEN_A = os.environ["TOKEN_A"].strip()
+    AGENT_B = os.environ["AGENT_B"].strip()
+    TOKEN_B = os.environ["TOKEN_B"].strip()
+    LOCAL_AGENT = PEER_AGENT = EDGE_BEARER = LOCAL_TOKEN = ""
+else:
+    LOCAL_AGENT = os.environ["LOCAL_AGENT"].strip()
+    PEER_AGENT = os.environ["PEER_AGENT"].strip()
+    EDGE_BEARER = os.environ["EDGE_BEARER"].strip()
+    LOCAL_TOKEN = os.environ["LOCAL_TOKEN"].strip()
+    AGENT_A = TOKEN_A = AGENT_B = TOKEN_B = ""
 CERT_FILE = os.environ.get("CERT_FILE", "/etc/koine-mailbox/mailbox-cert.pem")
 KEY_FILE = os.environ.get("KEY_FILE", "/etc/koine-mailbox/mailbox-key.pem")
 STATE_DIR = pathlib.Path(os.environ.get("STATE_DIR", "/var/lib/koine-mailbox"))
@@ -89,11 +119,16 @@ KILL = STATE_DIR / "DISABLED"
 AUDIT = STATE_DIR / "audit.jsonl"
 _audit_lock = threading.Lock()
 
-OUTBOX = deque()                 # queued envelopes awaiting pickup
+OUTBOX = deque()                 # proxy mode: queued outbound envelopes awaiting pickup
 RESULTS = {}                     # id -> reply object
 EVENTS = {}                      # id -> threading.Event
 _lock = threading.Lock()
 _outbox_event = threading.Event()
+
+# relay mode: one inbox per agent + who is entitled to reply to a given message id
+INBOXES = {}                     # agent -> deque of envelopes addressed to it
+INBOX_EVENTS = {}                # agent -> threading.Event (new-mail wakeup)
+REPLY_OWNER = {}                 # message id -> the agent whose /reply is accepted
 
 
 def _now():
@@ -115,14 +150,19 @@ def _db():
 def _init_db():
     with _db_lock, _db() as c:
         c.execute("CREATE TABLE IF NOT EXISTS asks "
-                  "(id TEXT PRIMARY KEY, thread_id TEXT, ts REAL, day TEXT)")
+                  "(id TEXT PRIMARY KEY, thread_id TEXT, ts REAL, day TEXT, sender TEXT DEFAULT '')")
+        cols = [r[1] for r in c.execute("PRAGMA table_info(asks)").fetchall()]
+        if "sender" not in cols:  # upgrade a pre-relay DB in place
+            c.execute("ALTER TABLE asks ADD COLUMN sender TEXT DEFAULT ''")
         c.execute("CREATE INDEX IF NOT EXISTS ix_thread ON asks(thread_id)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_day ON asks(day)")
 
 
-def _grant_gate(msg):
-    """Independent receiving-edge grant enforcement + /ask idempotency. Only cross-domain /ask
-    reaches here, so per-thread counting == cross-domain hops only (SPEC.md §5)."""
+def _grant_gate(msg, sender=""):
+    """Independent edge grant enforcement + /ask idempotency. Only cross-domain /ask reaches
+    here, so per-thread counting == cross-domain hops only (SPEC.md §5). In relay mode the
+    daily cap counts PER SENDER (each direction gets the grant's rate); dedup and thread-depth
+    are shared across the edge (a thread is one conversation regardless of who speaks)."""
     mtype = str(msg.get("type", "question"))
     if mtype not in GRANT_TYPES:
         return 403, f"type '{mtype}' not permitted by the local grant ({sorted(GRANT_TYPES)})"
@@ -135,14 +175,15 @@ def _grant_gate(msg):
             row = c.execute("SELECT ts FROM asks WHERE id=?", (mid,)).fetchone()
             if row and now - row["ts"] < SEEN_TTL:
                 return 409, "duplicate message id (replay/retry) — already handled"
-        n_day = c.execute("SELECT COUNT(*) n FROM asks WHERE day=?", (day,)).fetchone()["n"]
+        n_day = c.execute("SELECT COUNT(*) n FROM asks WHERE day=? AND sender=?",
+                          (day, sender)).fetchone()["n"]
         if n_day >= GRANT_MAX_PER_DAY:
             return 429, f"local grant daily cap reached ({GRANT_MAX_PER_DAY}/day)"
         n_thr = c.execute("SELECT COUNT(*) n FROM asks WHERE thread_id=?", (tid,)).fetchone()["n"]
         if n_thr >= GRANT_THREAD_DEPTH:
             return 429, f"local grant thread-depth cap reached ({GRANT_THREAD_DEPTH})"
-        c.execute("INSERT OR REPLACE INTO asks (id, thread_id, ts, day) VALUES (?,?,?,?)",
-                  (mid or os.urandom(6).hex(), tid, now, day))
+        c.execute("INSERT OR REPLACE INTO asks (id, thread_id, ts, day, sender) VALUES (?,?,?,?,?)",
+                  (mid or os.urandom(6).hex(), tid, now, day, sender))
     return None
 
 
@@ -248,7 +289,7 @@ class PublicHandler(BaseH):
             # peer -> us: only the granted peer, then independent grant enforcement + dedup.
             if str(msg.get("from", "")).strip() != PEER_AGENT:
                 return self._send(403, {"error": f"only '{PEER_AGENT}' may ask on this edge"})
-            gate = _grant_gate(msg)
+            gate = _grant_gate(msg, sender=PEER_AGENT)
             if gate:
                 code, reason = gate
                 _audit_write("ask_refused", id=msg.get("id"), frm=msg.get("from"),
@@ -279,6 +320,134 @@ class PublicHandler(BaseH):
                                            "body": e.read().decode(errors="replace")[:300]})
             except Exception as e:
                 return self._send(502, {"ok": False, "body": f"endpoint unreachable: {e}"})
+        return self._send(404, {"error": "not found"})
+
+
+class RelayHandler(BaseH):
+    """MODE=relay — a NEUTRAL host carrying one edge between two absent agents.
+
+    Identity is the TOKEN: whichever of the two per-agent bearers authenticated a request
+    determines who is speaking; the body's `from` is overwritten, never trusted. A `question`
+    blocks the sender's connection until the recipient POSTs /reply (the sender's gateway sees
+    an ordinary synchronous /ask). A `notification` is queued and answered 202 immediately —
+    the recipient may be offline; that asymmetry is the point of a mailbox."""
+
+    def _whoami(self):
+        tok = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+        if tok and hmac.compare_digest(tok, TOKEN_A):
+            return AGENT_A
+        if tok and hmac.compare_digest(tok, TOKEN_B):
+            return AGENT_B
+        return None
+
+    @staticmethod
+    def _other(agent):
+        return AGENT_B if agent == AGENT_A else AGENT_A
+
+    def do_GET(self):
+        if self.path == "/health":
+            body = {"status": "ok", "service": SERVICE_NAME, "mode": "relay",
+                    "disabled": KILL.exists(),
+                    "inbox": {a: len(INBOXES.get(a, ())) for a in (AGENT_A, AGENT_B)}}
+            d = _days_to_expiry()
+            if d is not None:
+                body["days_until_grant_expiry"] = d
+            return self._send(200, body)
+        if KILL.exists():
+            return self._send(503, {"error": "mailbox disabled (kill switch)"})
+        me = self._whoami()
+        if me is None:
+            return self._send(401, {"error": "unauthorized"})
+        if self.path.startswith("/inbox"):
+            wait = 0
+            if "wait=" in self.path:
+                try:
+                    wait = max(0, min(60, int(self.path.split("wait=")[1].split("&")[0])))
+                except ValueError:
+                    pass
+            box = INBOXES.setdefault(me, deque())
+            ev = INBOX_EVENTS.setdefault(me, threading.Event())
+            deadline = time.time() + wait
+            while True:
+                with _lock:
+                    if box:
+                        env = box.popleft()
+                        _audit_write("inbox_pickup", agent=me, id=env.get("id"),
+                                     type=env.get("type"))
+                        return self._send(200, {"envelopes": [env]})
+                    ev.clear()
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return self._send(200, {"envelopes": []})
+                ev.wait(min(remaining, 5))
+        return self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        if KILL.exists():
+            return self._send(503, {"error": "mailbox disabled (kill switch)"})
+        me = self._whoami()
+        if me is None:
+            return self._send(401, {"error": "unauthorized"})
+        msg = self._body()
+        if msg is None:
+            return self._send(400, {"error": "bad body"})
+        if self.path == "/reply":
+            rid = str(msg.get("reply_to", "")).strip()
+            if not rid:
+                return self._send(400, {"error": "reply_to required"})
+            with _lock:
+                if REPLY_OWNER.get(rid) != me:
+                    return self._send(403, {"error": "not the recipient of that message"})
+                RESULTS[rid] = msg.get("reply", {})
+                ev = EVENTS.get(rid)
+            if ev:
+                ev.set()
+            _audit_write("reply", agent=me, id=rid, ok=msg.get("reply", {}).get("ok"))
+            return self._send(200, {"ok": True})
+        if self.path == "/ask":
+            to = self._other(me)
+            gate = _grant_gate(msg, sender=me)
+            if gate:
+                code, reason = gate
+                _audit_write("ask_refused", frm=me, id=msg.get("id"),
+                             type=msg.get("type"), code=code, reason=reason)
+                return self._send(code, {"ok": False, "body": reason})
+            msg["from"] = me                  # token-derived, never body-claimed
+            msg["to"] = to
+            msg.setdefault("id", os.urandom(6).hex())
+            msg.setdefault("thread_id", msg["id"])
+            msg.setdefault("ts", _now())
+            mtype = str(msg.get("type", "question"))
+            box = INBOXES.setdefault(to, deque())
+            ev_new = INBOX_EVENTS.setdefault(to, threading.Event())
+            with _lock:
+                if len(box) >= MAX_QUEUE:
+                    return self._send(429, {"ok": False, "body": "recipient inbox full"})
+                box.append(msg)
+                REPLY_OWNER[msg["id"]] = to
+                if mtype != "notification":
+                    ev = EVENTS[msg["id"]] = threading.Event()
+            ev_new.set()
+            _audit_write("relay_queued", frm=me, to=to, id=msg["id"], type=mtype)
+            if mtype == "notification":
+                # fire-and-forget: delivery ack is pipeline-level (SPEC §4) — don't hold the line
+                return self._send(202, {"ok": True, "body": "queued",
+                                        "id": msg["id"], "thread_id": msg["thread_id"]})
+            ok = ev.wait(REPLY_TIMEOUT)
+            with _lock:
+                EVENTS.pop(msg["id"], None)
+                REPLY_OWNER.pop(msg["id"], None)
+                reply = RESULTS.pop(msg["id"], None)
+            if not ok or reply is None:
+                return self._send(504, {"ok": False,
+                                        "body": f"no reply from '{to}' within {REPLY_TIMEOUT}s "
+                                                "(recipient poller down or slow?)"})
+            _lf.log_exchange(
+                trace_id=msg.get("thread_id") or msg["id"],
+                name=f"{me}->{to}:{mtype}", sender=me, target=to, mtype=mtype,
+                body=msg.get("body", ""), reply=str(reply.get("body", "")),
+                ok=bool(reply.get("ok")), domain=DOMAIN)
+            return self._send(200 if reply.get("ok") else 502, reply)
         return self._send(404, {"error": "not found"})
 
 
@@ -337,6 +506,13 @@ def main():
     _init_db()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+    if MODE == "relay":
+        pub = ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), RelayHandler)
+        pub.socket = ctx.wrap_socket(pub.socket, server_side=True)
+        print(f"{SERVICE_NAME}: RELAY public :{PUBLIC_PORT} (TLS) "
+              f"[{AGENT_A} <-> {AGENT_B}] (neutral host, no local side)", flush=True)
+        pub.serve_forever()
+        return
     pub = ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), PublicHandler)
     pub.socket = ctx.wrap_socket(pub.socket, server_side=True)
     loc = ThreadingHTTPServer(("127.0.0.1", LOCAL_PORT), LocalHandler)

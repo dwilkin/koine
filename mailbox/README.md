@@ -1,9 +1,27 @@
 # koine-mailbox — public rendezvous for one edge
 
-Koine's **recommended default transport** (SPEC.md §8). A domain that can accept a public inbound
-connection hosts a mailbox; the peer domain reaches it by polling **outbound**, so a home or
-employer network never has to open an inbound hole. Public mailboxes are the norm; tunnels and
-direct endpoints are documented alternatives, not the default.
+Koine's **recommended default transport** (SPEC.md §8). A publicly-reachable mailbox is the norm;
+each domain reaches it by polling — so a home or employer network never opens an inbound hole.
+Tunnels and direct endpoints are documented alternatives, not the default.
+
+## Two modes (env `MODE`)
+
+- **`relay`** — a **neutral host** carries the edge (the koine.network model): *neither* agent is
+  on the box. Pure two-queue store-and-forward, two per-agent tokens (`TOKEN_A`/`TOKEN_B`) =
+  structural identity. `POST /ask` queues to the other agent's inbox and **blocks** for a
+  `question` (the sender's gateway sees an ordinary synchronous call) or returns **202** for a
+  `notification` (the recipient may be offline — the whole point of a mailbox). Each agent
+  `GET /inbox?wait=N` for messages addressed to it, then `POST /reply`. A multi-tenant service
+  wraps exactly this mode; the per-edge contract is identical. **Both agents poll** (each runs a
+  poller with `POLL_PATH=/inbox`).
+- **`proxy`** (default) — the **self-hosted** mode: this box *also* hosts the local agent's
+  answerer, so `POST /ask` proxies straight to it (`ENDPOINT_URL`) and the peer drains our
+  `GET /outbox`. One fewer moving part when you run your own mailbox next to your own agent.
+
+The rest of this README describes `proxy`; for `relay`, set `MODE=relay` + `AGENT_A/TOKEN_A/
+AGENT_B/TOKEN_B` and each side runs its poller against `/inbox`. `python3 test_relay.py` exercises
+the full relay contract (blocking question, token-identity, notification-202, reply-ownership,
+grant, caps, kill switch).
 
 ```
    peer domain (no inbound)                    your domain (hosts this mailbox)
