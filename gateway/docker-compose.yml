@@ -1,11 +1,11 @@
 services:
-  agent-gateway:
+  koine-gateway:
     build: .
-    container_name: agent-gateway
+    container_name: koine-gateway
     restart: unless-stopped
-    env_file: .env               # GW_BEARER_TOKEN, ENDPOINT_TOKEN, optional OIDC_*/TELEGRAM_* (written by deploy.sh from Vault, 0600, never committed)
+    env_file: .env               # GW_BEARER_TOKEN, ENDPOINT_TOKEN, optional OIDC_*/TELEGRAM_*/per-edge MAILBOX tokens (written by the domain's deploy from its vault, 0600, never committed)
     environment:
-      TZ: America/Denver
+      TZ: ${TZ:-UTC}
       GW_BIND: 0.0.0.0:8095
       AGENTS_JSON: /app/agents.json
       STATE_DIR: /data
@@ -13,48 +13,28 @@ services:
       MAX_MSGS_PER_HOUR: "60"
       COOLDOWN_SECONDS: "0"
       ROUTE_TIMEOUT: "200"
-      LANGFUSE_URL: http://192.0.2.10:3010
     ports:
       - "8095:8095"
-    extra_hosts:
-      - "example.com:192.0.2.10"   # container DNS can't resolve the lab name; TLS cert+CA still validate
     volumes:
-      - agent-gateway-data:/data   # SQLite audit store persists here
+      - koine-gateway-data:/data   # SQLite audit store persists here
 
-  poseidon-poller:
-    build: .
-    container_name: poseidon-poller
-    restart: unless-stopped
-    env_file: .env               # GW_BEARER_TOKEN (+ per-poller MAILBOX_TOKEN set explicitly below)
-    environment:
-      TZ: America/Denver
-      MAILBOX_URL: https://45.55.40.185:8443
-      MAILBOX_CA: /app/certs/poseidon-mailbox.pem
-      MAILBOX_TOKEN: ${POSEIDON_ENDPOINT_TOKEN}
-      PEER_AGENT: poseidon
-      GATEWAY_URL: http://192.0.2.10:8095
-    network_mode: bridge
-    command: ["python", "-u", "/app/poller.py"]
-    depends_on:
-      - agent-gateway
-
-  # Dewie's cid edge — reached over the WG tunnel (203.0.113.9:8443), no public port.
-  cid-poller:
-    build: .
-    container_name: cid-poller
-    restart: unless-stopped
-    env_file: .env               # GW_BEARER_TOKEN
-    environment:
-      TZ: America/Denver
-      MAILBOX_URL: https://203.0.113.9:8443
-      MAILBOX_CA: /app/certs/cid-mailbox.pem
-      MAILBOX_TOKEN: ${CID_ENDPOINT_TOKEN}
-      PEER_AGENT: cid
-      GATEWAY_URL: http://192.0.2.10:8095
-    network_mode: bridge
-    command: ["python", "-u", "/app/poller.py"]
-    depends_on:
-      - agent-gateway
+  # Cross-domain PEERS reached via a polled mailbox get one poller each. This reference
+  # compose ships none — a domain's deploy generates a docker-compose.override.yml with one
+  # poller per agents.json entry that has a `mailbox` block. Reference shape:
+  #
+  #   <name>-poller:
+  #     build: .
+  #     container_name: <name>-poller
+  #     restart: unless-stopped
+  #     env_file: .env
+  #     environment:
+  #       MAILBOX_URL:   https://<host>:8443
+  #       MAILBOX_CA:    /app/certs/<name>-mailbox.pem   # omit for a publicly-trusted cert
+  #       MAILBOX_TOKEN: ${<NAME>_MAILBOX_TOKEN}
+  #       PEER_AGENT:    <name>
+  #       GATEWAY_URL:   http://koine-gateway:8095
+  #     command: ["python", "-u", "/app/poller.py"]
+  #     depends_on: [koine-gateway]
 
 volumes:
-  agent-gateway-data:
+  koine-gateway-data:
