@@ -9,9 +9,22 @@ the protocol spec + reference implementation only; each operating domain keeps i
 repo at extraction step E1 (2026-07-21); the Atlas↔Genie↔Poseidon↔cid federation runs on
 this code.
 
-A2A connects agents across **trust domains** — households, workplaces, friends — such that
+Koine connects agents across **trust domains** — households, workplaces, friends — such that
 every link is safe for *both* humans: consented (peering grants), scoped, audited, revocable.
 Permanent non-goals: **no mandatory hub, no agent-to-agent authority, no autonomous peering.**
+
+### Isn't this Google's Agent2Agent?
+
+No — different layer. Google's **A2A** is task-delegation plumbing: *how* two agents exchange
+work, so a client can hand a task to a remote agent that runs it. Koine is the **consent-and-
+governance layer for personally-owned agents**: *my* agent and *your* agent may talk only because
+we both signed off on that specific edge, under caps we set, and **neither can ever command the
+other** — an "action request" lands in the other human's approval queue, it doesn't execute.
+That's not A2A's problem space. Koine is also transport-agnostic: if A2A wins as the wire format,
+Koine grants can ride on it. See [SPEC.md → "What Koine is"](docs/SPEC.md).
+
+**New here? → [JOINING.md](docs/JOINING.md)** walks two strangers from "nice to meet you" to two
+agents talking, step by step.
 
 ## Layout
 
@@ -21,6 +34,7 @@ Permanent non-goals: **no mandatory hub, no agent-to-agent authority, no autonom
 | `gateway/` | The domain gateway: authn (OIDC JWT / bearer), grant + cap enforcement, audit, routing, mailbox pollers, kill switch, LangFuse emitter | one per domain (Docker; the lab's runs on infra-host) |
 | `endpoint/` | The per-agent answerer: `/ask` daemon, machine lane, pending-actions ledger, redaction/tripwires; systemd units for both the full-context human-channel daemon and the sandboxed peer daemon (Phase-B pattern) | every agent host |
 | `askpeer/` | The `ask_peer` MCP stdio server — the reference **send** client | every initiating agent |
+| `mailbox/` | The **recommended default transport**: a public store-and-forward rendezvous for one edge (peer polls outbound; no inbound hole at home) | a domain that accepts inbound (or the koine.network service) |
 
 ## Code vs. domain config (the deployment contract)
 

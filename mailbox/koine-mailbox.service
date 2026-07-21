@@ -1,0 +1,24 @@
+[Unit]
+Description=Koine mailbox — store-and-forward rendezvous for one Koine edge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# All identity/grant/cert config comes from this EnvironmentFile (0600, root-owned):
+#   LOCAL_AGENT, PEER_AGENT, EDGE_BEARER, LOCAL_TOKEN, CERT_FILE, KEY_FILE
+#   optional: DOMAIN, STATE_DIR, ENDPOINT_URL, GRANT_TYPES, GRANT_MAX_PER_DAY,
+#             GRANT_THREAD_DEPTH, GRANT_EXPIRES
+EnvironmentFile=/etc/koine-mailbox/mailbox.env
+ExecStart=/usr/bin/python3 /opt/koine/mailbox/mailbox.py
+Restart=on-failure
+RestartSec=3
+# hardening: the mailbox needs only its state dir + cert dir
+DynamicUser=yes
+StateDirectory=koine-mailbox
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/koine-mailbox
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

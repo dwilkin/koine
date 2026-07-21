@@ -11,6 +11,34 @@ nucleus at E1). Live domains: wilkin-lab (ops overlay in `dwilkin/nucleus`), dew
 
 Keywords MUST/SHOULD/MAY are RFC-2119-shaped. Everything not marked normative is guidance.
 
+## What Koine is (and how it differs from Google's Agent2Agent)
+
+Koine and Google's **Agent2Agent (A2A)** answer different questions. A2A answers *"how do two
+agents exchange tasks?"* — a task-delegation RPC (JSON-RPC lifecycle, agent cards, streaming,
+standard OAuth-style auth) built so a client agent can hand work to a remote agent that executes
+it. Any client with valid credentials may call.
+
+Koine answers *"who **allowed** these two agents to talk, and what happens when one asks the
+other to act?"* — the **consent-and-governance layer for personally-owned agents**. Its core
+primitives have no equivalent in a task-delegation RPC:
+
+- **Human-signed peering grants (§5), default-deny.** An edge exists only because two specific
+  humans each approved *that edge*, with hard type/rate/depth caps enforced before any model
+  spawns, an expiry, and instant revocation. There is no "any authenticated client may call."
+- **No agent-to-agent authority (§1.2, §4).** An `action_request` does not execute — it lands in
+  the *target human's* approval ledger. This is the structural opposite of "delegate the task and
+  the remote agent runs it."
+- **Domains as units of human governance (§2).** Kill switches, per-domain audit, sandboxed
+  answerers, redaction — a domain protects its human, not just its uptime.
+- **Cost-awareness (§6.3, §4).** Every synchronous answer is a real model spawn; the machine lane
+  and `notification` semantics exist because answering has a price.
+
+Koine is deliberately **transport-and-format-agnostic** (§8, §0): where an industry envelope or
+agent-card format fits, adopt it — interop beats a private dialect. If Google A2A (or anything
+else) becomes the common transport, Koine grants can ride on top of it. Koine is the layer that
+says *my agent and yours may speak, under these terms, and neither may command the other* — which
+is not A2A's problem to solve.
+
 ## 0. Version
 
 - This spec is **`koine/1`**. The protocol version travels as an OPTIONAL `protocol_version`
