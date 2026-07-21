@@ -16,7 +16,7 @@ POLL_PATH selects the topology, the job is identical ("collect messages addresse
                       authenticated by OUR per-agent token.
 
 The gateway still enforces the grant (types/rate/expiry) — this poller is transport, not policy.
-Env: MAILBOX_URL, MAILBOX_TOKEN, GATEWAY_URL, GW_BEARER_TOKEN,
+Env: MAILBOX_URL, MAILBOX_TOKEN, GATEWAY_URL, GW_BEARER_TOKEN, GATEWAY_PATH (default /message),
      PEER_AGENT (required — the edge's remote peer), LOCAL_AGENT (default "atlas"),
      POLL_PATH (default "/outbox"), MAILBOX_CA (optional — omit for a publicly-trusted cert).
 """
@@ -32,6 +32,10 @@ MAILBOX_TOKEN = os.environ["MAILBOX_TOKEN"].strip()
 MAILBOX_CA = os.environ.get("MAILBOX_CA", "").strip()
 POLL_PATH = os.environ.get("POLL_PATH", "/outbox").strip()
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://agent-gateway:8095").rstrip("/")
+# A domain WITHOUT a gateway (single agent) points the poller straight at its answerer:
+# GATEWAY_URL=http://127.0.0.1:8090 GATEWAY_PATH=/ask (the answerer's {ok,body,meta} response
+# is posted back as the reply — shape-compatible with the gateway reply for the sender's client).
+GATEWAY_PATH = os.environ.get("GATEWAY_PATH", "/message").strip()
 GW_BEARER_TOKEN = os.environ["GW_BEARER_TOKEN"].strip()
 PEER_AGENT = os.environ["PEER_AGENT"].strip()          # whose mailbox this is — the forced `from`
 LOCAL_AGENT = os.environ.get("LOCAL_AGENT", "atlas").strip()
@@ -57,7 +61,7 @@ def handle(env):
                  "body": f"refused: {PEER_AGENT}<->{LOCAL_AGENT} is the only granted edge"}
     else:
         try:
-            reply = _req(GATEWAY_URL + "/message", env, GW_BEARER_TOKEN, timeout=230)
+            reply = _req(GATEWAY_URL + GATEWAY_PATH, env, GW_BEARER_TOKEN, timeout=230)
         except urllib.error.HTTPError as e:
             try:
                 reply = json.loads(e.read())
