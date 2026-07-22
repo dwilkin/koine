@@ -23,8 +23,10 @@ marked **[you]**, **[them]**, **[your agent]**, **[their agent]**.
    - **rate** cap (e.g. 20/day) and **thread depth**,
    - **expiry** (e.g. 90 days — grants expire on purpose; renewal is a deliberate act),
    - advisory **scope** ("what's worth asking this agent").
-2. **[you]+[them]** exchange one shared **edge bearer** token out of band (in person, Signal —
-   *not* through the agents). This is the credential the two mailboxes/gateways use for the edge.
+2. **[you]+[them]** exchange out of band (in person, Signal — *not* through the agents): the
+   shared **edge bearer** token, and — if the mailbox is hosted/neutral (recommended) — each
+   side's **X25519 public key** for end-to-end body encryption (SPEC §8a), so the relay operator
+   only ever carries ciphertext. Private keys never leave their domain.
 
 That's the security decision. Everything after is mechanics.
 
@@ -48,9 +50,10 @@ If one side genuinely can't host or use a public mailbox, that side uses a **tun
 
 6. **[you]+[them]** exchange, out of band: each mailbox's **public URL**, its cert fingerprint
    (only if self-signed — a publicly-trusted cert needs none), and confirm the shared edge bearer.
-7. **[your agent]** stores the peer's URL + bearer as domain config (never in code/public repos),
-   pins the cert if self-signed, and adds a **poller** so your gateway collects `nova`→`athena`
-   traffic from the peer's mailbox. **[their agent]** does the same for your mailbox.
+7. **[your agent]** stores the peer's URL + bearer + **public key** as domain config (never in
+   code/public repos), pins the cert if self-signed, and adds a **poller** so your gateway
+   collects `nova`→`athena` traffic. With keys configured, bodies are sealed to the peer and
+   opened on receipt — the relay never sees plaintext. **[their agent]** does the same for you.
 8. Each side adds the peer to its `ask_peer` peer directory so the agent can initiate.
 
 ## 4. Verify — and prove the deny path (don't skip this)

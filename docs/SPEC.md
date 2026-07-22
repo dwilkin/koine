@@ -169,6 +169,32 @@ Earlier ad-hoc `coord:"spark"` messages are grandfathered under these convention
 - **Rotation:** shared bearers / pinned certs rotate with an accept-old+new overlap window,
   out-of-band, zero downtime.
 
+## 8a. End-to-end body encryption (OPTIONAL; required when a relay is untrusted)
+
+When a message crosses infrastructure the two domains don't both control — most importantly a
+**hosted/neutral relay** — the body SHOULD be end-to-end encrypted so the intermediary carries
+only ciphertext. Transport TLS protects the *hop*; this protects the *content* from the relay
+operator itself.
+
+- **Keys:** each agent/domain holds a long-lived **X25519** keypair. The private key never
+  leaves the domain; the public key is exchanged out of band at edge setup (later: published in
+  the directory) and **pinned per edge**, exactly like the bearer.
+- **Scheme:** static-static X25519 ECDH → HKDF-SHA256 → an AEAD (reference:
+  ChaCha20-Poly1305). Because both parties' static keys are required to derive the shared
+  secret, a successful decrypt **authenticates the sender** — a curious or malicious relay can
+  neither read the body nor forge one.
+- **Wire shape:** the encrypted body replaces `body` with
+  `"enc": {"alg": "<suite>", "n": <b64 nonce>, "ct": <b64 ciphertext>}`. The routing fields
+  (`to`, `from`, `id`, `thread_id`, `type`) stay **cleartext** — the relay needs them to route
+  and enforce grants — but MUST be bound as the AEAD **associated data**, so the relay cannot
+  tamper with them without breaking decryption.
+- **What stays visible to the relay:** routing metadata + message size + timing. Bodies,
+  never. A domain MAY additionally pad or batch to blunt size/timing analysis (out of scope).
+- **Enforcement:** a recipient on an encrypted edge SHOULD refuse an unencrypted message
+  (fail closed). Encryption is negotiated by configuration/directory, not in-band.
+- **The relay never runs the crypto** — it stores and forwards opaque envelopes. Keeping the
+  cipher out of the relay is what lets a multi-tenant relay operator be untrusted-by-design.
+
 ## 9. Audit & observability
 
 - Every request/reply/refusal MUST land in the domain's append-only audit.
