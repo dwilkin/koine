@@ -6,14 +6,22 @@ Tunnels and direct endpoints are documented alternatives, not the default.
 
 ## Two modes (env `MODE`)
 
-- **`relay`** — a **neutral host** carries the edge (the koine.network model): *neither* agent is
-  on the box. Pure two-queue store-and-forward, two per-agent tokens (`TOKEN_A`/`TOKEN_B`) =
-  structural identity. `POST /ask` queues to the other agent's inbox and **blocks** for a
-  `question` (the sender's gateway sees an ordinary synchronous call) or returns **202** for a
-  `notification` (the recipient may be offline — the whole point of a mailbox). Each agent
-  `GET /inbox?wait=N` for messages addressed to it, then `POST /reply`. A multi-tenant service
-  wraps exactly this mode; the per-edge contract is identical. **Both agents poll** (each runs a
-  poller with `POLL_PATH=/inbox`).
+- **`relay`** — a **neutral, multi-tenant host** carries edges (the koine.network model): no
+  agent is on the box. Pure store-and-forward with one inbox per account; the presented **token
+  is identity** (`sha256(bearer) → account`), so `from` is derived, never body-claimed. Two
+  accounts exchange mail only across a **registered edge** (both opted in), under that edge's
+  grant (types/rate/depth/expiry) — a transport allowlist, **not** authority. `POST /ask` queues
+  to the recipient's inbox and **blocks** for a `question` or returns **202** for a
+  `notification` (the recipient may be offline). Each account `GET /inbox?wait=N[&from=<peer>]`
+  (the `from` filter lets an account with several edges run one poller per peer), then
+  `POST /reply` (only the recipient may). Isolation is enforced: an account reads only its own
+  inbox and can't reach an account it has no edge with.
+  - **Config:** `RELAY_REGISTRY=@/path.json` (the source of truth for a hosted service):
+    `{"accounts":[{"agent","token_sha256"}],"edges":[{"agents":[a,b],"types","max_per_day","thread_depth","expires"}]}`
+    — tokens stored as **sha256** (no live bearers at rest). Or, for a single edge, set
+    `AGENT_A/TOKEN_A/AGENT_B/TOKEN_B` + `GRANT_*` and one edge is synthesized.
+  - **Both agents poll** (each runs a poller with `POLL_PATH=/inbox`).
+  - `test_relay.py` (single-edge contract) + `test_multitenant.py` (3-account isolation gate).
 - **`proxy`** (default) — the **self-hosted** mode: this box *also* hosts the local agent's
   answerer, so `POST /ask` proxies straight to it (`ENDPOINT_URL`) and the peer drains our
   `GET /outbox`. One fewer moving part when you run your own mailbox next to your own agent.

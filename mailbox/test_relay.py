@@ -90,7 +90,7 @@ def main():
         def ask():
             result["s"], result["b"] = req(
                 "POST", "/ask", token=TOK_A,
-                body={"type": "question", "id": "q1", "thread_id": "t1",
+                body={"type": "question", "id": "q1", "thread_id": "t1", "to": "nova",
                       "body": "hello nova", "from": "SPOOF"}, timeout=15)
 
         th = threading.Thread(target=ask)
@@ -111,7 +111,7 @@ def main():
         print("reply-ownership: A may not reply to a message addressed to B:")
         def ask2():
             req("POST", "/ask", token=TOK_A,
-                body={"type": "question", "id": "q2", "thread_id": "t2", "body": "x"}, timeout=8)
+                body={"type": "question", "id": "q2", "thread_id": "t2", "to": "nova", "body": "x"}, timeout=8)
         th2 = threading.Thread(target=ask2, daemon=True)
         th2.start()
         time.sleep(0.4)
@@ -125,7 +125,7 @@ def main():
         print("notification is fire-and-forget (202, no block):")
         t0 = time.time()
         s, b = req("POST", "/ask", token=TOK_B,
-                   body={"type": "notification", "id": "n1", "body": "fyi"})
+                   body={"type": "notification", "id": "n1", "to": "athena", "body": "fyi"})
         check("notification -> 202", s == 202)
         check("returned immediately (<2s, did not block)", time.time() - t0 < 2)
         s, b = req("GET", "/inbox?wait=3", token=TOK_A)
@@ -133,7 +133,7 @@ def main():
 
         print("grant: disallowed type -> 403:")
         s, b = req("POST", "/ask", token=TOK_A,
-                   body={"type": "action_request", "id": "a1", "body": "do x"})
+                   body={"type": "action_request", "id": "a1", "to": "nova", "body": "do x"})
         check("action_request refused by grant", s == 403 and not b.get("ok"))
 
         print("grant: per-sender daily cap (5) -> 429 on the 6th from A:")
@@ -141,7 +141,7 @@ def main():
         codes = []
         for i in range(6):
             sc, _ = req("POST", "/ask", token=TOK_A,
-                        body={"type": "notification", "id": f"cap{i}", "body": "x"})
+                        body={"type": "notification", "id": f"cap{i}", "to": "nova", "body": "x"})
             codes.append(sc)
         check("cap eventually returns 429", 429 in codes)
 
@@ -150,7 +150,7 @@ def main():
         check("health still 200 when disabled", req("GET", "/health")[0] == 200)
         check("/ask 503 when disabled",
               req("POST", "/ask", token=TOK_A,
-                  body={"type": "question", "id": "kz", "body": "x"})[0] == 503)
+                  body={"type": "question", "id": "kz", "to": "nova", "body": "x"})[0] == 503)
     finally:
         proc.terminate()
         try:

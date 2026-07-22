@@ -83,11 +83,14 @@ except Exception:  # pragma: no cover
 MODE = os.environ.get("MODE", "proxy").strip().lower()
 
 if MODE == "relay":
-    AGENT_A = os.environ["AGENT_A"].strip()
-    TOKEN_A = os.environ["TOKEN_A"].strip()
-    AGENT_B = os.environ["AGENT_B"].strip()
-    TOKEN_B = os.environ["TOKEN_B"].strip()
+    # single-edge env (used only when RELAY_REGISTRY is unset — see the registry loader)
+    AGENT_A = os.environ.get("AGENT_A", "").strip()
+    TOKEN_A = os.environ.get("TOKEN_A", "").strip()
+    AGENT_B = os.environ.get("AGENT_B", "").strip()
+    TOKEN_B = os.environ.get("TOKEN_B", "").strip()
     LOCAL_AGENT = PEER_AGENT = EDGE_BEARER = LOCAL_TOKEN = ""
+    if not os.environ.get("RELAY_REGISTRY", "").strip() and not (AGENT_A and AGENT_B):
+        raise SystemExit("relay mode needs either RELAY_REGISTRY or AGENT_A/TOKEN_A/AGENT_B/TOKEN_B")
 else:
     LOCAL_AGENT = os.environ["LOCAL_AGENT"].strip()
     PEER_AGENT = os.environ["PEER_AGENT"].strip()
@@ -111,6 +114,61 @@ GRANT_THREAD_DEPTH = int(os.environ.get("GRANT_THREAD_DEPTH", "6"))
 GRANT_EXPIRES = os.environ.get("GRANT_EXPIRES", "").strip()   # "YYYY-MM-DD"
 SEEN_TTL = int(os.environ.get("SEEN_TTL", "900"))
 SERVICE_NAME = "koine-mailbox"
+
+# ── multi-tenant registry (KN2) ──────────────────────────────────────────────────────────────
+# relay mode serves MANY accounts and edges from one box. Config source (relay mode only):
+#   RELAY_REGISTRY=@/path.json  (or inline JSON) — the source of truth for a hosted service:
+#     {"accounts":[{"agent":"a","token_sha256":"…"}|{"agent":"a","token":"…"}],
+#      "edges":[{"agents":["a","b"],"types":[…],"max_per_day":N,"thread_depth":N,"expires":"…"}]}
+#   else (no registry) — a single edge is SYNTHESIZED from AGENT_A/B + TOKEN_A/B + GRANT_* env,
+#     so the single-edge deployment keeps working unchanged.
+# Tokens are held as sha256 (the registry file at rest never carries live bearers). Identity is
+# ALWAYS the presented token; a registered EDGE (both accounts opted in) is required to exchange
+# mail — transport-level allowlist + per-edge grant, NOT authority (the act-grant stays at each
+# domain's gateway, SPEC §1/§5).
+RELAY_REGISTRY = os.environ.get("RELAY_REGISTRY", "").strip()
+_TOKEN_TO_AGENT = {}          # sha256(token) -> agent name
+_AGENTS = set()               # all registered account names
+_EDGES = {}                   # frozenset({a,b}) -> {"types":set,"max_per_day","thread_depth","expires"}
+
+
+def _sha(t: str) -> str:
+    return __import__("hashlib").sha256(t.encode()).hexdigest()
+
+
+def _edge_key(a: str, b: str) -> str:
+    return "|".join(sorted((a, b)))
+
+
+def _register_account(agent: str, token: str = "", token_sha256: str = ""):
+    _AGENTS.add(agent)
+    _TOKEN_TO_AGENT[(token_sha256 or _sha(token))] = agent
+
+
+def _register_edge(a, b, types, max_per_day, thread_depth, expires):
+    _EDGES[frozenset((a, b))] = {"types": set(types), "max_per_day": int(max_per_day),
+                                 "thread_depth": int(thread_depth), "expires": expires or ""}
+
+
+def _load_registry():
+    if RELAY_REGISTRY:
+        raw = RELAY_REGISTRY
+        data = json.load(open(raw[1:])) if raw.startswith("@") else json.loads(raw)
+        for acc in data.get("accounts", []):
+            _register_account(acc["agent"], acc.get("token", ""), acc.get("token_sha256", ""))
+        for e in data.get("edges", []):
+            a, b = e["agents"]
+            _register_edge(a, b, e.get("types", ["question", "notification"]),
+                           e.get("max_per_day", 20), e.get("thread_depth", 6), e.get("expires", ""))
+    elif MODE == "relay":                 # single-edge, synthesized from env (backward compat)
+        _register_account(AGENT_A, TOKEN_A)
+        _register_account(AGENT_B, TOKEN_B)
+        _register_edge(AGENT_A, AGENT_B, GRANT_TYPES, GRANT_MAX_PER_DAY,
+                       GRANT_THREAD_DEPTH, GRANT_EXPIRES)
+
+
+def _edge_grant(a: str, b: str):
+    return _EDGES.get(frozenset((a, b)))
 
 DB_PATH = STATE_DIR / "edge.db"
 _db_lock = threading.Lock()
@@ -150,22 +208,28 @@ def _db():
 def _init_db():
     with _db_lock, _db() as c:
         c.execute("CREATE TABLE IF NOT EXISTS asks "
-                  "(id TEXT PRIMARY KEY, thread_id TEXT, ts REAL, day TEXT, sender TEXT DEFAULT '')")
+                  "(id TEXT PRIMARY KEY, thread_id TEXT, ts REAL, day TEXT, "
+                  "sender TEXT DEFAULT '', edge TEXT DEFAULT '')")
         cols = [r[1] for r in c.execute("PRAGMA table_info(asks)").fetchall()]
         if "sender" not in cols:  # upgrade a pre-relay DB in place
             c.execute("ALTER TABLE asks ADD COLUMN sender TEXT DEFAULT ''")
+        if "edge" not in cols:    # upgrade a pre-multitenant DB in place
+            c.execute("ALTER TABLE asks ADD COLUMN edge TEXT DEFAULT ''")
         c.execute("CREATE INDEX IF NOT EXISTS ix_thread ON asks(thread_id)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_day ON asks(day)")
 
 
-def _grant_gate(msg, sender=""):
-    """Independent edge grant enforcement + /ask idempotency. Only cross-domain /ask reaches
-    here, so per-thread counting == cross-domain hops only (SPEC.md §5). In relay mode the
-    daily cap counts PER SENDER (each direction gets the grant's rate); dedup and thread-depth
-    are shared across the edge (a thread is one conversation regardless of who speaks)."""
+def _grant_gate(msg, grant, sender="", edge=""):
+    """Per-edge grant enforcement + /ask idempotency, against the given grant dict
+    ({types,max_per_day,thread_depth,expires}). Daily cap counts PER (edge, sender) — each
+    direction of each edge gets its own rate; dedup is global by id; thread-depth is per thread
+    (a conversation is one thread regardless of who speaks). Expired grant -> refused."""
     mtype = str(msg.get("type", "question"))
-    if mtype not in GRANT_TYPES:
-        return 403, f"type '{mtype}' not permitted by the local grant ({sorted(GRANT_TYPES)})"
+    if mtype not in grant["types"]:
+        return 403, f"type '{mtype}' not permitted by this edge's grant ({sorted(grant['types'])})"
+    exp = grant.get("expires", "")
+    if exp and datetime.now(timezone.utc).strftime("%Y-%m-%d") > exp:
+        return 403, f"edge grant expired ({exp})"
     mid = str(msg.get("id", "")).strip()
     tid = str(msg.get("thread_id", "") or mid).strip()
     now = time.time()
@@ -175,26 +239,32 @@ def _grant_gate(msg, sender=""):
             row = c.execute("SELECT ts FROM asks WHERE id=?", (mid,)).fetchone()
             if row and now - row["ts"] < SEEN_TTL:
                 return 409, "duplicate message id (replay/retry) — already handled"
-        n_day = c.execute("SELECT COUNT(*) n FROM asks WHERE day=? AND sender=?",
-                          (day, sender)).fetchone()["n"]
-        if n_day >= GRANT_MAX_PER_DAY:
-            return 429, f"local grant daily cap reached ({GRANT_MAX_PER_DAY}/day)"
+        n_day = c.execute("SELECT COUNT(*) n FROM asks WHERE day=? AND sender=? AND edge=?",
+                          (day, sender, edge)).fetchone()["n"]
+        if n_day >= grant["max_per_day"]:
+            return 429, f"edge daily cap reached ({grant['max_per_day']}/day)"
         n_thr = c.execute("SELECT COUNT(*) n FROM asks WHERE thread_id=?", (tid,)).fetchone()["n"]
-        if n_thr >= GRANT_THREAD_DEPTH:
-            return 429, f"local grant thread-depth cap reached ({GRANT_THREAD_DEPTH})"
-        c.execute("INSERT OR REPLACE INTO asks (id, thread_id, ts, day, sender) VALUES (?,?,?,?,?)",
-                  (mid or os.urandom(6).hex(), tid, now, day, sender))
+        if n_thr >= grant["thread_depth"]:
+            return 429, f"edge thread-depth cap reached ({grant['thread_depth']})"
+        c.execute("INSERT OR REPLACE INTO asks (id, thread_id, ts, day, sender, edge) "
+                  "VALUES (?,?,?,?,?,?)",
+                  (mid or os.urandom(6).hex(), tid, now, day, sender, edge))
     return None
 
 
 def _days_to_expiry():
-    if not GRANT_EXPIRES:
-        return None
-    try:
-        exp = datetime.strptime(GRANT_EXPIRES, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        return (exp - datetime.now(timezone.utc)).days
-    except ValueError:
-        return None
+    """Soonest edge-grant expiry in days (for Gatus). Considers all registered edges in relay
+    mode, else the single GRANT_EXPIRES. None if nothing expires."""
+    exps = [g["expires"] for g in _EDGES.values() if g.get("expires")] or \
+           ([GRANT_EXPIRES] if GRANT_EXPIRES else [])
+    days = []
+    for e in exps:
+        try:
+            exp = datetime.strptime(e, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            days.append((exp - datetime.now(timezone.utc)).days)
+        except ValueError:
+            pass
+    return min(days) if days else None
 
 
 class BaseH(BaseHTTPRequestHandler):
@@ -289,7 +359,9 @@ class PublicHandler(BaseH):
             # peer -> us: only the granted peer, then independent grant enforcement + dedup.
             if str(msg.get("from", "")).strip() != PEER_AGENT:
                 return self._send(403, {"error": f"only '{PEER_AGENT}' may ask on this edge"})
-            gate = _grant_gate(msg, sender=PEER_AGENT)
+            gate = _grant_gate(msg, {"types": GRANT_TYPES, "max_per_day": GRANT_MAX_PER_DAY,
+                                     "thread_depth": GRANT_THREAD_DEPTH, "expires": GRANT_EXPIRES},
+                                sender=PEER_AGENT, edge=_edge_key(PEER_AGENT, LOCAL_AGENT))
             if gate:
                 code, reason = gate
                 _audit_write("ask_refused", id=msg.get("id"), frm=msg.get("from"),
@@ -324,31 +396,26 @@ class PublicHandler(BaseH):
 
 
 class RelayHandler(BaseH):
-    """MODE=relay — a NEUTRAL host carrying one edge between two absent agents.
+    """MODE=relay — a NEUTRAL, MULTI-TENANT host (KN2): many accounts, many edges, one box.
 
-    Identity is the TOKEN: whichever of the two per-agent bearers authenticated a request
-    determines who is speaking; the body's `from` is overwritten, never trusted. A `question`
-    blocks the sender's connection until the recipient POSTs /reply (the sender's gateway sees
-    an ordinary synchronous /ask). A `notification` is queued and answered 202 immediately —
-    the recipient may be offline; that asymmetry is the point of a mailbox."""
+    Identity is the TOKEN: sha256(bearer) -> account name; the body's `from` is overwritten,
+    never trusted. Two accounts may exchange mail only across a REGISTERED EDGE (both opted in),
+    under that edge's grant (types/rate/depth/expiry) — transport allowlist, not authority.
+    Isolation: an account reads only its own inbox, may reply only to messages addressed to it,
+    and cannot reach an account it has no edge with. A `question` blocks until the recipient
+    replies; a `notification` returns 202 (the recipient may be offline)."""
 
     def _whoami(self):
         tok = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        if tok and hmac.compare_digest(tok, TOKEN_A):
-            return AGENT_A
-        if tok and hmac.compare_digest(tok, TOKEN_B):
-            return AGENT_B
-        return None
-
-    @staticmethod
-    def _other(agent):
-        return AGENT_B if agent == AGENT_A else AGENT_A
+        return _TOKEN_TO_AGENT.get(_sha(tok)) if tok else None
 
     def do_GET(self):
         if self.path == "/health":
+            edges = [{"agents": sorted(k), "expires": v.get("expires", "")}
+                     for k, v in _EDGES.items()]
             body = {"status": "ok", "service": SERVICE_NAME, "mode": "relay",
-                    "disabled": KILL.exists(),
-                    "inbox": {a: len(INBOXES.get(a, ())) for a in (AGENT_A, AGENT_B)}}
+                    "disabled": KILL.exists(), "accounts": len(_AGENTS), "edges": edges,
+                    "inbox": {a: len(INBOXES.get(a, ())) for a in sorted(_AGENTS)}}
             d = _days_to_expiry()
             if d is not None:
                 body["days_until_grant_expiry"] = d
@@ -359,21 +426,27 @@ class RelayHandler(BaseH):
         if me is None:
             return self._send(401, {"error": "unauthorized"})
         if self.path.startswith("/inbox"):
-            wait = 0
-            if "wait=" in self.path:
-                try:
-                    wait = max(0, min(60, int(self.path.split("wait=")[1].split("&")[0])))
-                except ValueError:
-                    pass
+            wait, only_from = 0, ""
+            for part in self.path.split("?", 1)[-1].split("&"):
+                if part.startswith("wait="):
+                    try:
+                        wait = max(0, min(60, int(part[5:])))
+                    except ValueError:
+                        pass
+                elif part.startswith("from="):
+                    only_from = part[5:]   # multi-edge: drain just one peer's mail
             box = INBOXES.setdefault(me, deque())
             ev = INBOX_EVENTS.setdefault(me, threading.Event())
             deadline = time.time() + wait
             while True:
                 with _lock:
-                    if box:
-                        env = box.popleft()
-                        _audit_write("inbox_pickup", agent=me, id=env.get("id"),
-                                     type=env.get("type"))
+                    idx = next((i for i, e in enumerate(box)
+                                if not only_from or e.get("from") == only_from), None)
+                    if idx is not None:
+                        env = box[idx]
+                        del box[idx]
+                        _audit_write("inbox_pickup", agent=me, frm=env.get("from"),
+                                     id=env.get("id"), type=env.get("type"))
                         return self._send(200, {"envelopes": [env]})
                     ev.clear()
                 remaining = deadline - time.time()
@@ -405,11 +478,18 @@ class RelayHandler(BaseH):
             _audit_write("reply", agent=me, id=rid, ok=msg.get("reply", {}).get("ok"))
             return self._send(200, {"ok": True})
         if self.path == "/ask":
-            to = self._other(me)
-            gate = _grant_gate(msg, sender=me)
+            to = str(msg.get("to", "")).strip()
+            if to not in _AGENTS:
+                return self._send(400, {"ok": False, "body": f"unknown recipient '{to}'"})
+            grant = _edge_grant(me, to)
+            if grant is None:
+                _audit_write("ask_refused", frm=me, to=to, code=403, reason="no edge")
+                return self._send(403, {"ok": False,
+                                        "body": f"no registered edge {me}<->{to}"})
+            gate = _grant_gate(msg, grant, sender=me, edge=_edge_key(me, to))
             if gate:
                 code, reason = gate
-                _audit_write("ask_refused", frm=me, id=msg.get("id"),
+                _audit_write("ask_refused", frm=me, to=to, id=msg.get("id"),
                              type=msg.get("type"), code=code, reason=reason)
                 return self._send(code, {"ok": False, "body": reason})
             msg["from"] = me                  # token-derived, never body-claimed
@@ -504,13 +584,14 @@ class LocalHandler(BaseH):
 
 def main():
     _init_db()
+    _load_registry()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT_FILE, KEY_FILE)
     if MODE == "relay":
         pub = ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), RelayHandler)
         pub.socket = ctx.wrap_socket(pub.socket, server_side=True)
-        print(f"{SERVICE_NAME}: RELAY public :{PUBLIC_PORT} (TLS) "
-              f"[{AGENT_A} <-> {AGENT_B}] (neutral host, no local side)", flush=True)
+        print(f"{SERVICE_NAME}: RELAY public :{PUBLIC_PORT} (TLS) — {len(_AGENTS)} accounts, "
+              f"{len(_EDGES)} edge(s) (neutral multi-tenant host)", flush=True)
         pub.serve_forever()
         return
     pub = ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), PublicHandler)
