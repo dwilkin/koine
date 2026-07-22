@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent answer-endpoint — Atlas <-> Genie A2A messaging, Phase 1 (the linchpin).
+"""Agent answer-endpoint — the Koine answerer daemon (SPEC.md §6, endpoint/README.md).
 
 An always-on HTTP daemon that answers a *peer agent's* message by spawning `claude -p`
 with THIS agent's full context — its CLAUDE.md, tools, and (critically) its guard hooks —
@@ -7,12 +7,11 @@ and returning the reply SYNCHRONOUSLY. Because it runs `claude -p` locally, the 
 reachable 24/7 regardless of whether its interactive session is active, and any action the
 peer asks for still passes through the same PreToolUse guard hooks (action-gating for free).
 
-It must run on the host where the agent's `claude` binary + context live:
-  agent-host  -> Atlas (workdir /home/claude/lab)
-  peer-host -> Genie (workdir /home/genie)
+It must run on the host where the agent's `claude` binary + context (WORKDIR with its
+CLAUDE.md) live — one daemon per agent.
 
-Design notes (see agent-endpoint/README.md and ~/.claude/plans/crystalline-growing-quail.md):
-  * Stdlib only (ThreadingHTTPServer) — no pip deps; agent-host is not a workload host.
+Design notes (see endpoint/README.md and SPEC.md §6):
+  * Stdlib only (ThreadingHTTPServer) — no pip deps on the agent host.
   * Bearer-token auth (constant-time). Token injected from Vault by run.sh into the env;
     never written to disk or the unit file.
   * The peer message is framed to the answerer as UNTRUSTED DATA, not instructions.
@@ -22,7 +21,7 @@ Design notes (see agent-endpoint/README.md and ~/.claude/plans/crystalline-growi
   * A kill switch: presence of $STATE_DIR/DISABLED makes /ask refuse (503) without a restart.
 
 Config via environment (set by the systemd unit / run.sh):
-  AGENT_NAME        identity, e.g. "atlas" | "genie"                 (required)
+  AGENT_NAME        this agent's identity                             (required)
   AUTH_TOKEN        bearer token for POST /ask                        (required)
   ENDPOINT_BIND     host:port to listen on           (default 0.0.0.0:8090)
   CLAUDE_BIN        absolute path to claude          (default /home/<user>/.local/bin/claude)
@@ -105,8 +104,9 @@ MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "65536"))
 DISALLOWED_TOOLS = os.environ.get(
     "DISALLOWED_TOOLS", "mcp__ask-peer__ask_peer,Edit,Write,WebFetch,WebSearch").strip()
 DISALLOWED_TOOLS_HUMAN = os.environ.get("DISALLOWED_TOOLS_HUMAN", "").strip()
-# Host-specific proactive-notify helper for security alerts (redaction/tripwire hits). agent-host:
-# scripts/notify-darian.sh; peer-host: agent-notify/notify-marie.py. Empty = audit-only (no push).
+# Domain-specific proactive-notify helper for security alerts (redaction/tripwire hits) —
+# any executable taking the alert text as argv[1] (e.g. a notify-<human>.sh that Telegrams
+# the agent's human). Empty = audit-only (no push).
 ALERT_CMD = os.environ.get("ALERT_CMD", "").strip()
 PERMISSION_MODE_HUMAN = os.environ.get("PERMISSION_MODE_HUMAN", "").strip()
 # Phase B (2026-07-06): set on the UNPRIVILEGED peer daemon so it structurally refuses the human
@@ -121,9 +121,10 @@ _env_peer_allow = os.environ.get("ALLOWED_TOOLS_PEER")
 ALLOWED_TOOLS_PEER = (_default_peer_allow if _env_peer_allow is None else _env_peer_allow).strip()
 # STRICT_MCP (opt-in here, default OFF): on the PEER path, spawn with --strict-mcp-config + an
 # empty --mcp-config so NO inherited MCP server is reachable (a name-list --disallowedTools can't
-# express that). Default OFF because Genie's peer answers legitimately need her google-mcp; set
-# STRICT_MCP=1 on edges that should have an empty MCP surface (Poseidon, atlas-peer). Federation
-# joiners default it ON. Fails CLOSED (bad --mcp-config errors the spawn, no full-MCP fallback).
+# express that). Default OFF because some agents' peer answers legitimately need an MCP server
+# (e.g. a calendar gateway); set STRICT_MCP=1 on daemons that should have an empty MCP surface
+# (sandboxed peer answerers). Federation joiners default it ON. Fails CLOSED (a bad --mcp-config
+# errors the spawn, no full-MCP fallback).
 STRICT_MCP = os.environ.get("STRICT_MCP", "").strip() in ("1", "true", "yes")
 MCP_CONFIG = os.environ.get(
     "MCP_CONFIG", str(pathlib.Path(__file__).resolve().parent / "empty-mcp.json"))
@@ -132,12 +133,12 @@ STATE_DIR = pathlib.Path(
 )
 AUDIT = STATE_DIR / "audit.jsonl"
 KILL = STATE_DIR / "DISABLED"
-# Machine lane (cid feedback 2026-07-20, points 1+2): deterministic, LLM-free
-# answers for caldera/v1 read-only questions (catalog/availability/balance,
-# served verbatim from the worker-published JSON under WORKDIR/caldera) and
-# pipeline acks for informational caldera notifications. State-changing kinds
-# ALWAYS fall through to the LLM+ledger path. Peer channel only. Default ON;
-# a host with no published caldera context (e.g. peer-host) no-ops naturally.
+# Machine lane: deterministic, LLM-free answers for caldera/v1 read-only
+# questions (catalog/availability/balance, served verbatim from the
+# worker-published JSON under WORKDIR/caldera) and pipeline acks for
+# informational caldera notifications. State-changing kinds ALWAYS fall
+# through to the LLM+ledger path. Peer channel only. Default ON; a host with
+# no published caldera context no-ops naturally.
 MACHINE_LANE = os.environ.get("MACHINE_LANE", "1").strip() not in ("0", "false", "no")
 CALDERA_CTX = pathlib.Path(os.environ.get(
     "CALDERA_CTX", str(pathlib.Path(WORKDIR) / "caldera")))

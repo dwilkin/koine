@@ -3,7 +3,7 @@
 read-only answers + pipeline acks, with state-changing kinds and non-caldera
 traffic falling through to the LLM path (None).
 
-Run directly: python3 agent-endpoint/test_machine_lane.py
+Run directly: python3 endpoint/test_machine_lane.py
 """
 import json
 import os

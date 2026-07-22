@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SYNCED COPIES: gateway/langfuse_emit.py and mailbox/langfuse_emit.py are byte-identical
+# on purpose (each deploys standalone) — any edit here must be mirrored in the other file.
 """langfuse_emit — zero-dependency, best-effort A2A tracing to a per-domain LangFuse.
 
 Deliberately stdlib-only (urllib) so it drops into the gateway, the poller, and the

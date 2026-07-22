@@ -1,40 +1,56 @@
 #!/usr/bin/env python3
-"""A2A gateway — the central hub for Atlas (agent-host) <-> Genie (peer-host) messaging.
+"""Koine gateway — a domain's central hub for agent-to-agent messaging (SPEC.md §6.1).
 
-Phase 2 of ~/.claude/plans/crystalline-growing-quail.md. Sits between the initiating
-agent's `ask_peer` MCP tool and the recipient's always-on answer-endpoint (:8090 /ask).
-Adds the safety layer the direct endpoint call lacks:
+Sits between an initiating agent's `ask_peer` MCP tool (askpeer/) and the recipient's
+always-on answer-endpoint (endpoint/, POST /ask). Adds the safety layer a direct endpoint
+call lacks:
 
-  * AUDIT      — every message + reply persisted to SQLite (Darian-readable via GET /audit).
-  * AUTHN      — caller presents a Keycloak (workloads realm) JWT *or*, for bootstrap, the
-                 gateway bearer token. Identity (agent name) is taken from the token, and the
-                 message's `from` must match it (no spoofing a peer).
+  * AUDIT      — every message + reply persisted to SQLite (operator-readable via GET /audit).
+  * AUTHN      — caller presents an OIDC JWT *or*, for bootstrap, the gateway bearer token.
+                 Identity (agent name) is taken from the token, and the message's `from`
+                 must match it (no spoofing a peer).
   * RATE/LOOP  — per-agent messages/hour + cooldown, and a per-thread depth cap so an
                  agent<->agent exchange cannot recurse forever. Breach => refuse (+ notify).
-  * POLICY     — only known agents, known routes; body/size validation.
+  * POLICY     — only known agents, known routes; body/size validation; peering-grant
+                 enforcement (types/rate/expiry, SPEC.md §5).
   * NOTIFY     — action_request / escalation classes ping the recipient's human via Telegram
                  (best-effort; a no-op that still audits if Telegram is unconfigured).
   * KILL SWITCH— presence of $STATE_DIR/DISABLED (or `docker stop`) severs all traffic.
 
-Runs in a container on infra-host (deps are fine here, unlike agent-host). Stdlib HTTP + sqlite3 +
-urllib; only third-party dep is PyJWT[crypto] for Keycloak token validation.
+Runs in a container (see Dockerfile / docker-compose.yml). Stdlib HTTP + sqlite3 + urllib;
+only third-party dep is PyJWT[crypto] for OIDC token validation.
 
-Config via environment (compose + deploy.sh from Vault):
+Config via environment (compose + the domain's deploy script from its secret store):
   GW_BIND              listen host:port                       (default 0.0.0.0:8095)
   GW_BEARER_TOKEN      bootstrap/fallback bearer for callers  (required unless OIDC-only)
-  OIDC_JWKS_URL        Keycloak realm JWKS endpoint           (optional; enables JWT authn)
+  OIDC_JWKS_URL        OIDC realm JWKS endpoint               (optional; enables JWT authn)
   OIDC_ISSUER          expected `iss`                         (optional)
   OIDC_AUDIENCE        expected `aud` (comma list ok)         (optional)
+  OIDC_CA_FILE         CA bundle for the JWKS fetch TLS       (optional; legacy alias
+                                                               LAB_CA_FILE still accepted)
+  OIDC_CLIENT_MAP      "clientId=agent,..." azp->agent map    (optional; default convention
+                                                               strips an "agent-" prefix)
+  DOMAIN               observability label for this domain    (optional)
   AGENTS_JSON          path to the agent-card directory       (default /app/agents.json)
   ENDPOINT_TOKEN       bearer for the peers' /ask endpoints   (required)
+  MY_PRIVKEY           this domain's X25519 private key; enables E2E body encryption on
+                       edges whose card carries a `pubkey`    (optional)
   MAX_THREAD_DEPTH     messages allowed per thread_id         (default 6)
   MAX_MSGS_PER_HOUR    per-initiator cap                      (default 60)
   COOLDOWN_SECONDS     min gap between one agent's messages   (default 0)
-  ROUTE_TIMEOUT        seconds to await a peer's answer        (default 200)
-  TELEGRAM_BOT_TOKEN   bot token (optional; notify no-op if unset)
-  TELEGRAM_CHAT_ATLAS  chat id for Atlas's human (Darian)     (optional)
-  TELEGRAM_CHAT_GENIE  chat id for Genie's human (Marie)      (optional)
+  ROUTE_TIMEOUT        seconds to await a peer's answer       (default 200)
+  NOTIFY_MAX_PER_HOUR  POST /notify per-agent hourly cap      (default 10)
+  NOTIFY_QUIET         local-hour quiet window "start-end"    (default "22-7"; "" disables)
+  NOTIFY_TZ            timezone for the quiet window          (default America/Denver)
+  BRIDGE_NOTE_URL      chat-bridge history hook URL           (optional)
+  TELEGRAM_BOT_TOKEN   shared/fallback bot token              (optional; notify no-op if unset)
+  TELEGRAM_BOT_TOKEN_<AGENT>  per-recipient bot token         (optional; falls back to shared)
+  TELEGRAM_CHAT_<AGENT>       chat id for <agent>'s human     (optional; discovered from env)
+  OPERATOR_AGENT       agent whose human receives gateway-level notices such as cap-raise
+                       proposals                              (default "atlas")
   STATE_DIR            audit db + kill-switch dir             (default /data)
+Per-card indirection: an agent card may set `endpoint_token_env` naming the env var holding
+that edge's bearer (falls back to ENDPOINT_TOKEN); `ca_file` pins the edge's TLS.
 """
 import hmac
 import json
@@ -52,7 +68,13 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
-import langfuse_emit as _lf
+try:  # observability is optional — the gateway runs fine without it
+    import langfuse_emit as _lf
+except Exception:  # pragma: no cover
+    class _lf:  # type: ignore
+        @staticmethod
+        def log_exchange(**_):
+            return None
 
 # E2E body encryption (KN1) — optional. MY_PRIVKEY is this domain's X25519 private key; a peer
 # card's `pubkey` opts that edge into encryption. Import lazily so the gateway runs without
@@ -83,19 +105,30 @@ NOTIFY_TZ = os.environ.get("NOTIFY_TZ", "America/Denver")
 # port, not 127.0.0.1.
 BRIDGE_NOTE_URL = os.environ.get("BRIDGE_NOTE_URL", "").strip()  # optional; a domain that runs a chat bridge sets it
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()  # shared fallback
-# Per-recipient bot token (Darian's Atlas bot vs Marie's Genie bot) — each falls back to the
-# shared token so one bot works for both until a separate Genie-branded bot exists.
-TELEGRAM_BOT = {
-    "atlas": os.environ.get("TELEGRAM_BOT_TOKEN_ATLAS", "").strip() or TELEGRAM_BOT_TOKEN,
-    "genie": os.environ.get("TELEGRAM_BOT_TOKEN_GENIE", "").strip() or TELEGRAM_BOT_TOKEN,
-    # poseidon is Darian's work agent — his human notifications go to Darian's bot/chat
-    "poseidon": os.environ.get("TELEGRAM_BOT_TOKEN_ATLAS", "").strip() or TELEGRAM_BOT_TOKEN,
-}
-TELEGRAM_CHAT = {
-    "atlas": os.environ.get("TELEGRAM_CHAT_ATLAS", "").strip(),
-    "genie": os.environ.get("TELEGRAM_CHAT_GENIE", "").strip(),
-    "poseidon": os.environ.get("TELEGRAM_CHAT_POSEIDON", "").strip(),
-}
+# Per-recipient Telegram wiring is DISCOVERED from the environment — domain data never lives
+# in this file. Every TELEGRAM_CHAT_<AGENT> / TELEGRAM_BOT_TOKEN_<AGENT> variable maps to the
+# lowercased agent name; the per-agent bot token falls back to the shared TELEGRAM_BOT_TOKEN
+# so one bot can serve several humans (an agent whose human shares another's bot/chat just
+# gets that chat id set, e.g. TELEGRAM_CHAT_POSEIDON=<same chat id as atlas's>).
+# Example env (the reference deployment): TELEGRAM_CHAT_ATLAS, TELEGRAM_CHAT_GENIE,
+# TELEGRAM_CHAT_POSEIDON + TELEGRAM_BOT_TOKEN_GENIE (atlas/poseidon use the shared token).
+
+
+def _discover_telegram():
+    bots, chats = {}, {}
+    for k, v in os.environ.items():
+        if k.startswith("TELEGRAM_CHAT_") and len(k) > len("TELEGRAM_CHAT_"):
+            chats[k[len("TELEGRAM_CHAT_"):].lower()] = v.strip()
+        elif k.startswith("TELEGRAM_BOT_TOKEN_") and len(k) > len("TELEGRAM_BOT_TOKEN_"):
+            bots[k[len("TELEGRAM_BOT_TOKEN_"):].lower()] = v.strip()
+    agents = set(bots) | set(chats)
+    return ({a: (bots.get(a, "") or TELEGRAM_BOT_TOKEN) for a in agents},
+            {a: chats.get(a, "") for a in agents})
+
+
+TELEGRAM_BOT, TELEGRAM_CHAT = _discover_telegram()
+# Gateway-level operator notices (e.g. cap-raise proposals) go to this agent's human.
+OPERATOR_AGENT = os.environ.get("OPERATOR_AGENT", "atlas").strip()
 STATE_DIR = os.environ.get("STATE_DIR", "/data")
 DB_PATH = os.path.join(STATE_DIR, "audit.db")
 KILL = os.path.join(STATE_DIR, "DISABLED")
@@ -119,15 +152,16 @@ _db_lock = threading.Lock()
 _last_sent = {}          # agent -> monotonic ts of its last accepted message (cooldown)
 _last_sent_lock = threading.Lock()
 
-# Optional Keycloak JWT validation. Import lazily so the gateway still runs bearer-only.
-# The JWKS is served by infra-host over TLS from the lab CA, so trust that CA for the fetch.
-LAB_CA_FILE = os.environ.get("LAB_CA_FILE", "").strip()
+# Optional OIDC JWT validation. Import lazily so the gateway still runs bearer-only.
+# If the JWKS endpoint's TLS chains to a private CA, point OIDC_CA_FILE at that CA bundle
+# (LAB_CA_FILE is the accepted legacy name).
+OIDC_CA_FILE = (os.environ.get("OIDC_CA_FILE") or os.environ.get("LAB_CA_FILE") or "").strip()
 try:
     import jwt as _jwt
     from jwt import PyJWKClient as _PyJWKClient
     if OIDC_JWKS_URL:
         _jwks_ctx = ssl.create_default_context(
-            cafile=LAB_CA_FILE if (LAB_CA_FILE and os.path.exists(LAB_CA_FILE)) else None)
+            cafile=OIDC_CA_FILE if (OIDC_CA_FILE and os.path.exists(OIDC_CA_FILE)) else None)
         _jwk_client = _PyJWKClient(OIDC_JWKS_URL, ssl_context=_jwks_ctx)
     else:
         _jwk_client = None
@@ -213,7 +247,7 @@ def _identify(headers):
             )
             # client_credentials token -> azp / clientId identifies the agent.
             azp = claims.get("azp") or claims.get("client_id") or ""
-            agent = _CLIENT_TO_AGENT.get(azp, azp)
+            agent = _client_to_agent(azp)
             if agent in AGENTS:
                 return agent, {"auth": "oidc", "azp": azp}
             return None, f"token client '{azp}' is not a known agent"
@@ -228,8 +262,18 @@ def _identify(headers):
     return None, "unauthorized"
 
 
-# clientId -> agent-name map for Keycloak azp claims (dedicated A2A clients).
-_CLIENT_TO_AGENT = {"agent-atlas": "atlas", "agent-genie": "genie"}
+# OIDC clientId (azp) -> agent-name mapping. Set OIDC_CLIENT_MAP="clientA=agent1,clientB=agent2"
+# explicitly, or rely on the default convention: a client named "agent-<name>" maps to <name>
+# (e.g. dedicated per-agent clients agent-atlas -> atlas); any other azp is used as-is.
+# Either way the result must still be a known agent (checked by the caller).
+_OIDC_CLIENT_MAP = dict(
+    p.split("=", 1) for p in os.environ.get("OIDC_CLIENT_MAP", "").split(",") if "=" in p)
+
+
+def _client_to_agent(azp):
+    if _OIDC_CLIENT_MAP:
+        return _OIDC_CLIENT_MAP.get(azp, azp)
+    return azp[len("agent-"):] if azp.startswith("agent-") else azp
 
 
 # ---- caps ------------------------------------------------------------------
@@ -322,15 +366,15 @@ def _propose_cap_raise(edge_agent, cap):
     proposed = cap * 2
     text = (f"[A2A gateway] the '{edge_agent}' edge hit its {cap}/day grant cap — further "
             f"messages are refused until the 24h window rolls. Proposal: raise to "
-            f"{proposed}/day. To approve, tell Atlas \"raise the {edge_agent} cap to "
+            f"{proposed}/day. To approve, tell {OPERATOR_AGENT} \"raise the {edge_agent} cap to "
             f"{proposed}\" (agents.json + gateway redeploy; the peer's human should "
             f"mirror their edge).")
     try:
-        note = _telegram("atlas", text)
+        note = _telegram(OPERATOR_AGENT, text)
         if note == "sent":
-            _bridge_note("atlas", text)
+            _bridge_note(OPERATOR_AGENT, text)
         _audit("cap_raise_proposed",
-               {"from": edge_agent, "to": "atlas", "type": "notification",
+               {"from": edge_agent, "to": OPERATOR_AGENT, "type": "notification",
                 "body": f"cap {cap} hit; proposed {proposed}"},
                ok=1, meta={"edge": edge_agent, "cap": cap, "proposed": proposed})
     except Exception:

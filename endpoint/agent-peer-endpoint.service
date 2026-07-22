@@ -1,9 +1,10 @@
 # SYSTEM unit (install to /etc/systemd/system/) for the UNPRIVILEGED, sandboxed PEER answer-daemon.
-# Phase B of docs/A2A_HARDENING_PLAN.md — closes the read-exfil gap: this daemon runs as a
-# dedicated user with no Vault token, no SSH keys, no docker group and a curated read-only workdir,
-# so even a fully jailbroken answerer's Read tool hits kernel EACCES on every credential.
+# The sandboxed-answerer posture of SPEC.md §6.2 — closes the read-exfil gap: this daemon runs as
+# a dedicated user with no secret-store token, no SSH keys, no docker group and a curated
+# read-only workdir, so even a fully jailbroken answerer's Read tool hits kernel EACCES on every
+# credential.
 #
-# Requires (root, one-time bootstrap — see the plan doc):
+# Requires (root, one-time bootstrap):
 #   - user `atlas-peer` (agent-host) / `genie-peer` (peer-host): system user, no login shell, not in
 #     docker/sudo, own home under /var/lib/agent-peer.
 #   - /etc/agent-peer/peer.env  (root:atlas-peer 0640): AUTH_TOKEN=<peer inbound bearer> and

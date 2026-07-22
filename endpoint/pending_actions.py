@@ -39,21 +39,18 @@ STATE_DIR = pathlib.Path(
 )
 
 # --- canonical (unified) ledger location ---------------------------------------------
-# Split-brain fix (2026-07-20): before this, the sandboxed peer answerer (:8093, user
-# atlas-peer, ProtectHome — see agent-peer-endpoint.service) recorded peer action-requests
-# into its own STATE_DIR (/var/lib/agent-peer/state/pending-actions.json), while the
-# interactive session + the :8090 human/Telegram daemon read the default
-# ~/.local/share/agent-endpoint/pending-actions.json. Two files, no bridge → every peer
-# request was invisible to the human's approval flow and quietly auto-expired.
-#
-# The peer daemon is jailed to /var/lib/agent-peer/state (ReadWritePaths + ProtectHome),
-# so that dir is the ONLY place BOTH the sandboxed peer user and the home-side (claude) can
-# reach. Its default POSIX ACLs grant both atlas-peer and the claude group rwx on every new
-# file (self-healing across atomic replace), so it is the natural single source of truth.
+# RULE: every daemon and session that proposes or approves actions for ONE agent must
+# resolve to the SAME ledger file — a sandboxed peer daemon writing its own copy while the
+# human channel reads another means peer requests silently auto-expire unapproved. The
+# sandboxed daemon's state dir is the one path both sides can reach (ReadWritePaths +
+# ProtectHome jail it there; POSIX default ACLs let the privileged side in), so it wins
+# when writable. (Full war story: the reference deployment's ops repo, split-brain fix
+# 2026-07-20.)
 # Resolution order:
 #   1. $PENDING_LEDGER   — explicit override (daemons/tests).
-#   2. the shared sandbox ledger, if that dir is writable by us (agent-host: unifies both sides).
-#   3. $STATE_DIR/pending-actions.json — per-host fallback (e.g. peer-host/Genie, not split).
+#   2. the shared sandbox ledger, if that dir is writable by us (unifies both sides on a
+#      host that runs the split peer daemon).
+#   3. $STATE_DIR/pending-actions.json — per-host fallback (hosts with no split daemon).
 _SHARED_STATE = pathlib.Path("/var/lib/agent-peer/state")
 
 
@@ -84,6 +81,9 @@ def _iso(dt):
 class _Locked:
     def __enter__(self):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
+        # The lock/ledger may live outside STATE_DIR (PENDING_LEDGER override or the shared
+        # sandbox dir) — make sure THAT parent exists too, or open(LOCK) crashes.
+        LEDGER.parent.mkdir(parents=True, exist_ok=True)
         self.fh = open(LOCK, "w")
         fcntl.flock(self.fh, fcntl.LOCK_EX)
         return self

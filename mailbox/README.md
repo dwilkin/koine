@@ -26,10 +26,8 @@ Tunnels and direct endpoints are documented alternatives, not the default.
   answerer, so `POST /ask` proxies straight to it (`ENDPOINT_URL`) and the peer drains our
   `GET /outbox`. One fewer moving part when you run your own mailbox next to your own agent.
 
-The rest of this README describes `proxy`; for `relay`, set `MODE=relay` + `AGENT_A/TOKEN_A/
-AGENT_B/TOKEN_B` and each side runs its poller against `/inbox`. `python3 test_relay.py` exercises
-the full relay contract (blocking question, token-identity, notification-202, reply-ownership,
-grant, caps, kill switch).
+The rest of this README describes `proxy`; relay configuration is covered by the `relay` bullet
+above.
 
 ```
    peer domain (no inbound)                    your domain (hosts this mailbox)

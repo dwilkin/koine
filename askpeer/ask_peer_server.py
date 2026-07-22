@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""ask_peer — the A2A *initiation* side: a minimal stdlib MCP (stdio) server that lets
+"""ask_peer — the Koine *initiation* side: a minimal stdlib MCP (stdio) server that lets
 THIS agent ask its peer a question and get the answer back in the same live turn.
 
-Phase 3 of ~/.claude/plans/crystalline-growing-quail.md. Exposes one tool, `ask_peer`,
-which mints this agent's Keycloak (workloads realm) token via client_credentials and POSTs
-an A2A message to the central gateway (infra-host:8095 /message). The gateway audits, applies
-loop/rate caps, routes to the peer's answer-endpoint, and returns the reply synchronously.
+Exposes one tool, `ask_peer`, which mints this agent's OIDC token via client_credentials
+(or uses the bootstrap bearer) and POSTs a Koine message to the domain's central gateway
+(gateway/, POST /message). The gateway audits, applies loop/rate caps, routes to the
+peer's answer-endpoint, and returns the reply synchronously.
 
-Stdlib only (no `mcp` SDK, no pip) so it deploys identically to agent-host (Atlas) and peer-host
-(Genie). MCP stdio transport = newline-delimited JSON-RPC 2.0.
+Stdlib only (no `mcp` SDK, no pip) so it deploys identically on any agent host.
+MCP stdio transport = newline-delimited JSON-RPC 2.0.
 
-Config via environment (set by run.sh from Vault on agent-host, from a 600 EnvironmentFile on
-peer-host — secrets never live in ~/.claude.json):
-  AGENT_NAME        this agent's identity: "atlas" | "genie"           (required)
-  GATEWAY_URL       A2A gateway base, e.g. http://192.0.2.10:8095     (required)
-  KC_TOKEN_URL      Keycloak token endpoint (IP ok; iss stays hostname) (optional)
-  KC_CLIENT_ID      this agent's KC client: agent-atlas | agent-genie   (optional)
+Config via environment (set by run.sh from your secret store, or a 0600 EnvironmentFile —
+secrets never live in ~/.claude.json):
+  AGENT_NAME        this agent's identity                               (required)
+  GATEWAY_URL       gateway base, e.g. http://<gateway-host>:8095       (required)
+  KC_TOKEN_URL      OIDC token endpoint (IP ok; iss stays hostname)     (optional)
+  KC_CLIENT_ID      this agent's OIDC client, e.g. agent-<name>         (optional)
   KC_CLIENT_SECRET  its client secret                                   (optional)
   GW_BEARER_TOKEN   fallback bearer if KC auth is unavailable           (optional)
   A2A_TIMEOUT       seconds to await the peer's answer (default 210)
@@ -73,8 +73,9 @@ def _load_peers():
 
 PEERS = _load_peers()
 
-# Lab CA isn't in agent-host/peer-host trust stores; the token endpoint is hit by IP. The security
-# of A2A rests on the JWT signature (validated at the gateway) + the LAN, not this leg's TLS.
+# A private CA typically isn't in the agent host's trust store, and the token endpoint may be
+# hit by IP. The security of this leg rests on the JWT signature (validated at the gateway) +
+# the trusted local network, not this leg's TLS.
 _SSL = ssl.create_default_context()
 _SSL.check_hostname = False
 _SSL.verify_mode = ssl.CERT_NONE

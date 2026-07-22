@@ -17,8 +17,10 @@ POLL_PATH selects the topology, the job is identical ("collect messages addresse
 
 The gateway still enforces the grant (types/rate/expiry) — this poller is transport, not policy.
 Env: MAILBOX_URL, MAILBOX_TOKEN, GATEWAY_URL, GW_BEARER_TOKEN, GATEWAY_PATH (default /message),
-     PEER_AGENT (required — the edge's remote peer), LOCAL_AGENT (default "atlas"),
-     POLL_PATH (default "/outbox"), MAILBOX_CA (optional — omit for a publicly-trusted cert).
+     PEER_AGENT (required — the edge's remote peer), LOCAL_AGENT (this domain's receiving
+     agent — SET IT EXPLICITLY; the "atlas" default exists only for back-compat with
+     deployments that predate the extraction), POLL_PATH (default "/outbox"),
+     MAILBOX_CA (optional — omit for a publicly-trusted cert).
 """
 import json
 import os
@@ -41,7 +43,7 @@ ENC = bool(MY_PRIVKEY and PEER_PUBKEY)
 ENC_REQUIRE = os.environ.get("ENC_REQUIRE", "").strip() in ("1", "true", "yes")
 if ENC:
     import crypto
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://agent-gateway:8095").rstrip("/")
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://koine-gateway:8095").rstrip("/")
 # A domain WITHOUT a gateway (single agent) points the poller straight at its answerer:
 # GATEWAY_URL=http://127.0.0.1:8090 GATEWAY_PATH=/ask (the answerer's {ok,body,meta} response
 # is posted back as the reply — shape-compatible with the gateway reply for the sender's client).
@@ -114,22 +116,21 @@ def handle(env):
                 env = crypto.open_body(env, MY_PRIVKEY, peer_pub)
             except Exception as e:
                 reply = {"ok": False, "body": f"decrypt/auth failed: {e}"}
-    if reply is not None:
-        pass
-    elif str(env.get("to", "")).strip() != LOCAL_AGENT:
-        reply = {"ok": False, "body": f"refused: not addressed to {LOCAL_AGENT}"}
-    else:
-        env["from"] = sender          # authenticated sender handed to the gateway
-        try:
-            reply = _req(GATEWAY_URL + GATEWAY_PATH, env, GW_BEARER_TOKEN, timeout=230)
-        except urllib.error.HTTPError as e:
+    if reply is None:
+        if str(env.get("to", "")).strip() != LOCAL_AGENT:
+            reply = {"ok": False, "body": f"refused: not addressed to {LOCAL_AGENT}"}
+        else:
+            env["from"] = sender      # authenticated sender handed to the gateway
             try:
-                reply = json.loads(e.read())
-            except Exception:
-                reply = {"ok": False, "body": f"gateway HTTP {e.code}"}
-            reply.setdefault("ok", False)
-        except Exception as e:
-            reply = {"ok": False, "body": f"gateway unreachable: {e}"}
+                reply = _req(GATEWAY_URL + GATEWAY_PATH, env, GW_BEARER_TOKEN, timeout=230)
+            except urllib.error.HTTPError as e:
+                try:
+                    reply = json.loads(e.read())
+                except Exception:
+                    reply = {"ok": False, "body": f"gateway HTTP {e.code}"}
+                reply.setdefault("ok", False)
+            except Exception as e:
+                reply = {"ok": False, "body": f"gateway unreachable: {e}"}
     if enc_edge:                      # encrypt the reply body back to the sender
         reply.setdefault("id", env.get("id", ""))
         reply.setdefault("thread_id", env.get("thread_id", env.get("id", "")))

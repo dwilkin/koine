@@ -7,7 +7,7 @@
 **Status:** NORMATIVE. Promoted from the wilkin-lab A2A platform plan at extraction step E0 (2026-07-21). Design rationale, threat model, and roadmap live with each operating domain's
 (private) ops docs; **this document is the contract.** Reference implementation: THIS repo (`gateway/`, `endpoint/`, `askpeer/`; extracted from
 nucleus at E1). Live domains: wilkin-lab (ops overlay in `dwilkin/nucleus`), dewie-homelab
-(`cid`), do-work (`poseidon` mailbox). Applications: `caldera/v1` (reference app).
+(`cid`), do-work (`poseidon`, via the koine.network relay). Applications: `caldera/v1` (reference app).
 
 Keywords MUST/SHOULD/MAY are RFC-2119-shaped. Everything not marked normative is guidance.
 

@@ -142,16 +142,6 @@ def _edge_key(a: str, b: str) -> str:
     return "|".join(sorted((a, b)))
 
 
-def _register_account(agent: str, token: str = "", token_sha256: str = ""):
-    _AGENTS.add(agent)
-    _TOKEN_TO_AGENT[(token_sha256 or _sha(token))] = agent
-
-
-def _register_edge(a, b, types, max_per_day, thread_depth, expires):
-    _EDGES[frozenset((a, b))] = {"types": set(types), "max_per_day": int(max_per_day),
-                                 "thread_depth": int(thread_depth), "expires": expires or ""}
-
-
 def _load_registry():
     """(Re)build the account/edge tables from the registry file (or synthesized single-edge env).
     Rebuilds into fresh dicts and swaps them atomically, so it is safe to call live (SIGHUP) while

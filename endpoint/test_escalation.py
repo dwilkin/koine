@@ -2,7 +2,7 @@
 """Model-escalation unit tests (Darian's 2026-07-21 policy: default opus,
 escalate to fable on error). Uses a FAKE claude binary — no model calls.
 
-Run directly: python3 agent-endpoint/test_escalation.py
+Run directly: python3 endpoint/test_escalation.py
 """
 import json
 import os
@@ -93,7 +93,7 @@ class EscalationTest(unittest.TestCase):
 
     def test_human_channel_uses_model_human(self):
         ok, text, _meta = endpoint._answer(
-            dict(MSG, channel="human", from_="d") | {"from": "darian"})
+            dict(MSG, channel="human") | {"from": "darian"})
         self.assertTrue(ok)
         # MODEL_HUMAN defaults to MODEL (opus) in this env
         self.assertEqual(text, "answered by opus")

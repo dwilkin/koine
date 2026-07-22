@@ -1,51 +1,63 @@
-# agent-endpoint — Atlas ↔ Genie answer-endpoint (A2A messaging, Phase 1)
+# endpoint — the Koine answer-endpoint (answerer daemon)
 
-The **linchpin** of the A2A-service messaging model (full plan:
-`~/.claude/plans/crystalline-growing-quail.md`, memory `agent-messaging-plan`). A small,
-dependency-free HTTP daemon that runs **on the host where the agent's `claude` + context live**
-and answers a *peer agent's* message by spawning `claude -p`. The reply comes back
-**synchronously** as the HTTP response, so an agent is reachable 24/7 regardless of whether its
-interactive session is active — and because it's a real `claude -p`, any action a peer asks for
-still hits the same **guard hooks** (action-gating for free).
+The **linchpin** of Koine's agent-as-a-service model (SPEC.md §6). A small, dependency-free
+HTTP daemon that runs **on the host where the agent's `claude` + context live** and answers an
+inbound message by spawning `claude -p`. The reply comes back **synchronously** as the HTTP
+response, so an agent is reachable 24/7 regardless of whether its interactive session is active —
+and because it's a real `claude -p`, any action a caller asks for still hits the same **guard
+hooks** (action-gating for free).
 
 ```
-peer (live turn) --POST /ask--> [agent-endpoint] --spawn--> claude -p (full context + hooks)
-                 <---answer----                   <--result--
+caller (gateway/bridge) --POST /ask--> [answer-endpoint] --spawn--> claude -p (full context + hooks)
+                        <---answer----                    <--result--
 ```
 
 ## Layout
 - `endpoint.py` — the daemon (stdlib `ThreadingHTTPServer`; no pip deps).
-- `run.sh` — launcher: reads the bearer token from Vault into the env, then exec's the daemon.
-- `agent-endpoint.service` — `systemd --user` unit template (set per-agent values via env).
-- This README.
+- `run.sh` — launcher: reads the bearer token(s) from your secret store into the env, then
+  exec's the daemon.
+- `agent-endpoint.service` — `systemd --user` reference unit for the full-context daemon
+  (human/ops channels).
+- `agent-peer-endpoint.service` — system reference unit for the **sandboxed, unprivileged**
+  peer-facing daemon (SPEC §6.2).
+- `pending_actions.py` — the durable pending-actions ledger (propose in one spawn, approve +
+  execute in a later one).
+- `redaction.py` — peer-path output redaction + inbound secret-seeking tripwire.
+- `empty-mcp.json` — empty MCP config used by `STRICT_MCP`.
+- `test_machine_lane.py`, `test_escalation.py` — unit tests (fake `claude`, no model calls).
 
-## Security model (Phase 1)
-- **Auth:** every `POST /ask` needs `Authorization: Bearer <token>`; token in Vault
-  your secret store, injected by `run.sh` (never on disk / in the unit). Constant-time compare.
-- **Answerer posture:** *full-capability + hook-gating* (Darian's call 2026-07-02). The spawned
-  `claude -p` inherits the host agent's full tool permissions; destructive/outbound actions are
-  stopped by the existing **PreToolUse guard hooks**, not by tool restriction. Because of that,
-  the compensating controls below are load-bearing.
-- **Untrusted-input framing:** the peer's text is handed to the answerer as UNTRUSTED DATA between
+## Security model
+- **Auth:** every `POST /ask` needs `Authorization: Bearer <token>`; the token lives in your
+  secret store and is injected into the process env by `run.sh` (never on disk / in the unit).
+  Constant-time compare. A separate `OPS_TOKEN` may authenticate the ops channel only.
+- **Answerer posture:** *full-capability + hook-gating*. The spawned `claude -p` inherits the
+  host agent's tool permissions; destructive/outbound actions are stopped by the existing
+  **PreToolUse guard hooks**, not by tool restriction alone. Because of that, the compensating
+  controls below are load-bearing.
+- **Untrusted-input framing:** a peer's text is handed to the answerer as UNTRUSTED DATA between
   fences, explicitly *not* as instructions that can override CLAUDE.md / guard rails.
-- **No recursion:** the answerer is spawned with `--disallowedTools mcp__ask-peer__ask_peer`
-  (the future Phase-3 tool), so it can't call back out and start a loop.
+- **No recursion:** peer spawns are launched with `--disallowedTools` including the `ask_peer`
+  tool (`askpeer/` in this repo), so an answerer can't call back out and start a loop.
+- **Peer-path hardening:** `Edit,Write,WebFetch,WebSearch` are also disallowed by default on the
+  peer path; replies are scrubbed for secret-shaped strings and inbound secret-seeking asks trip
+  an alert (`redaction.py` + `ALERT_CMD`). The structural fix is running the peer daemon as an
+  unprivileged sandboxed user — see `agent-peer-endpoint.service` and SPEC §6.2.
 - **Caps:** `MAX_CONCURRENCY` semaphore (429 when busy), `ANSWER_TIMEOUT`, `MAX_BODY_BYTES`.
 - **Kill switch:** `touch $STATE_DIR/DISABLED` → `/ask` returns 503 with no restart
   (`rm` it to re-enable). Or just `systemctl --user stop agent-endpoint`.
 - **Audit:** append-only `$STATE_DIR/audit.jsonl` (default `~/.local/share/agent-endpoint/`) —
-  every ask/answer/auth-reject/busy event, Darian-readable. (Phase 2 adds the central gateway's
-  SQLite audit; this local log stays as a per-host record. Register it in BACKUP_PLAN.md in Phase 4.)
+  every ask/answer/auth-reject/busy event. The domain gateway keeps its own SQLite audit; this
+  local log is the per-host record (include it in your domain's backup set).
 
-> Phase 1 is directly callable (bearer auth). Phase 2 puts the domain **gateway** in
-> front for Keycloak authn, rate/loop caps, policy routing, and the agent-card directory.
+> The endpoint is directly callable (bearer auth), but a domain normally puts its **gateway**
+> (`gateway/`) in front for OIDC authn, rate/loop caps, grant enforcement, and routing.
 
 ## Channels
 - *(none / default)* — **peer**: untrusted-data framing, restricted tools, redaction + tripwires.
 - `"human"` — the agent's own human via an authenticated bridge (e.g. Telegram): control-channel
   framing; with `PERMISSION_MODE_HUMAN=bypassPermissions` it's a real control channel (guard hooks
   stay the hard floor).
-- `"ops"` (2026-07-22) — **monitoring wakes the agent to troubleshoot.** Authenticated by a
+- `"ops"` — **monitoring wakes the agent to troubleshoot.** Authenticated by a
   separate `OPS_TOKEN` valid for this channel ONLY (the monitoring stack never holds the human
   bearer; the main bearer also works). Spawn parameters match the human channel — the agent must
   be able to fix things — but the framing is honest: a MACHINE alert carrying no human authority,
@@ -56,17 +68,20 @@ peer (live turn) --POST /ask--> [agent-endpoint] --spawn--> claude -p (full cont
   cycle (spawn storm). The outcome lands in the audit log + the agent's proactive notify. A 429
   (busy) is safe: the sender retries next cycle. Example caller: a Gatus `alerting.custom`
   provider POSTing `{"from":"gatus","channel":"ops","type":"question","body":"GATUS ALERT …"}`.
+- A **machine lane** (peer channel only, `MACHINE_LANE=1` default) answers `caldera/v1` read-only
+  questions and acks informational notifications deterministically from published JSON — no LLM
+  spawn, zero cost. State-changing kinds always take the LLM + ledger path.
 
-## Message schema (A2A-inspired)
+## Message schema (Koine envelope — SPEC §3)
 `POST /ask` body — JSON object:
 ```json
-{ "id": "uuid", "thread_id": "uuid", "from": "genie", "type": "question", "body": "…", "ts": "…" }
+{ "id": "uuid", "thread_id": "uuid", "from": "<peer>", "type": "question", "body": "…", "ts": "…" }
 ```
 `type ∈ {question, answer, notification, action_request, escalation}`. Response mirrors it with
 `from`=this agent, `type`="answer", `body`=the reply, plus a `meta` block (elapsed, cost_usd,
 num_turns, session_id).
 
-`GET /health` → `{"status":"ok","agent":"atlas","disabled":false}`.
+`GET /health` → `{"status":"ok","agent":"<name>","disabled":false}`.
 
 ## Deploy
 The daemon runs the same everywhere; only per-domain config differs. Install the systemd `--user`
@@ -76,7 +91,7 @@ cp agent-endpoint.service ~/.config/systemd/user/ && systemctl --user daemon-rel
 systemctl --user enable --now agent-endpoint && curl -s http://127.0.0.1:8090/health
 ```
 The bearer (`AUTH_TOKEN`) comes from `run.sh` (fetches it from your secret store) OR a 0600
-`EnvironmentFile` if the host has no vault reach — never on disk in the unit. A domain with
+`EnvironmentFile` if the host has no secret-store reach — never on disk in the unit. A domain with
 multiple agents deploys one unit per agent (distinct `AGENT_NAME`/`WORKDIR`). Domain-specific
 deploy steps, secret paths, and host wiring live in that domain's own ops repo, not here.
 
@@ -87,17 +102,28 @@ secrets reachable) — SPEC §6.2; the human control channel stays a separate, f
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AGENT_NAME` | *(required)* | this agent's identity |
-| `AUTH_TOKEN` | *(from Vault)* | bearer token; injected by run.sh |
+| `AUTH_TOKEN` | *(required)* | main bearer token; injected by run.sh or an EnvironmentFile |
+| `OPS_TOKEN` | *(unset)* | separate bearer valid for `channel:"ops"` ONLY (monitoring wake-ups); unset = ops reachable only via the main bearer |
 | `ENDPOINT_BIND` | `0.0.0.0:8090` | listen host:port |
 | `CLAUDE_BIN` | `~/.local/bin/claude` | absolute path to claude |
 | `WORKDIR` | cwd | project dir (must hold CLAUDE.md) |
 | `MODEL` | `sonnet` | pinned answer model (cost control) |
+| `MODEL_HUMAN` | `MODEL` | model for `channel:"human"` asks (e.g. a smarter model for chat) |
+| `MODEL_ESCALATION` | *(unset)* | retry-once model when a spawn fails (non-zero exit / is_error; never on timeout); empty = no escalation |
 | `ANSWER_TIMEOUT` | `180` | seconds per answer |
+| `ANSWER_TIMEOUT_HUMAN` | `ANSWER_TIMEOUT` | seconds per human-channel answer (raise with a slower `MODEL_HUMAN`; the bridge's timeout must exceed it) |
 | `MAX_CONCURRENCY` | `2` | concurrent answerers |
 | `MAX_BODY_BYTES` | `65536` | request body cap |
-| `DISALLOWED_TOOLS` | `mcp__ask-peer__ask_peer` | `--disallowedTools` (no recursion) |
-| `STATE_DIR` | `~/.local/share/agent-endpoint` | audit + kill switch |
+| `DISALLOWED_TOOLS` | `mcp__ask-peer__ask_peer,Edit,Write,WebFetch,WebSearch` | peer-path `--disallowedTools` (no recursion, no write/outbound) |
+| `DISALLOWED_TOOLS_HUMAN` | *(empty)* | same, for `channel:"human"` (empty = the human channel may use ask_peer) |
+| `PERMISSION_MODE_HUMAN` | *(empty)* | `--permission-mode` for human-channel spawns; set `bypassPermissions` to make chat a real control channel (guard hooks stay the floor) |
+| `ALLOWED_TOOLS_PEER` | `Bash(python3 <pending_actions.py>:*)` | `--allowedTools` for peer spawns — just the ledger, so an action_request can be RECORDED without granting general shell; empty string disables |
+| `REFUSE_HUMAN_CHANNEL` | *(off)* | set `1` on the sandboxed peer daemon so it structurally 403s the human/ops channels |
+| `ALERT_CMD` | *(empty)* | executable invoked with the alert text on redaction/tripwire hits (your domain's notify helper); empty = audit-only |
+| `STRICT_MCP` | *(off)* | peer path: spawn with `--strict-mcp-config` + an empty `--mcp-config` (`MCP_CONFIG`, default `empty-mcp.json`) so no inherited MCP server is reachable |
+| `MACHINE_LANE` | `1` | deterministic caldera/v1 read-only answers + acks (peer channel); `CALDERA_CTX` (default `WORKDIR/caldera`) holds the published JSON |
+| `STATE_DIR` | `~/.local/share/agent-endpoint` | audit + kill switch + ledger fallback |
 
 ## Cost note
-Each answer is a cold `claude -p` (~$0.13 on a warm context, ~3.6–7s). `MODEL=sonnet` keeps it
-down; watch `meta.cost_usd` in the audit log.
+Each answer is a cold `claude -p`. `MODEL=sonnet` keeps it down; the machine lane answers
+caldera/v1 reads at $0; watch `meta.cost_usd` in the audit log.

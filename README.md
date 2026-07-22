@@ -60,7 +60,14 @@ pattern with its own ops repo.
 
 ## Tests
 
-`cd endpoint && python3 test_machine_lane.py && python3 test_escalation.py` (stdlib, no deps).
+All stdlib, no deps — five files:
+
+- `python3 test_crypto.py` — E2E envelope crypto (repo root).
+- `cd endpoint && python3 test_machine_lane.py && python3 test_escalation.py` — answerer
+  machine lane + model-escalation policy.
+- `cd mailbox && python3 test_relay.py && python3 test_multitenant.py` — relay contract +
+  multi-tenant account/edge isolation.
+
 The gateway is exercised by its live health/deny paths; domain ops repos carry integration
 checks (the lab: Gatus probes + guard-hook suite).
 
