@@ -47,6 +47,14 @@ REPLY_TIMEOUT = int(os.environ.get("REPLY_TIMEOUT", "210"))
 DOMAIN = os.environ.get("DOMAIN", "").strip()
 RELAY_CA = os.environ.get("RELAY_CA", "").strip()
 
+# E2E body encryption (KN1) — opt-in: MY_PRIVKEY + PEER_PUBKEY encrypt the outbound body and
+# decrypt the reply, so the relay only carries ciphertext. Unset -> plaintext (unchanged).
+MY_PRIVKEY = os.environ.get("MY_PRIVKEY", "").strip()
+PEER_PUBKEY = os.environ.get("PEER_PUBKEY", "").strip()
+ENC = bool(MY_PRIVKEY and PEER_PUBKEY)
+if ENC:
+    import crypto
+
 CTX = ssl.create_default_context(cafile=RELAY_CA) if RELAY_CA else ssl.create_default_context()
 
 
@@ -90,11 +98,14 @@ class Handler(BaseHTTPRequestHandler):
         if str(msg.get("to", "")).strip() != PEER_AGENT:
             return self._send(403, {"error": f"this edge only reaches '{PEER_AGENT}'"})
         msg["from"] = LOCAL_AGENT   # informational; the relay re-derives from RELAY_TOKEN
+        msg["to"] = PEER_AGENT
         msg.setdefault("id", os.urandom(6).hex())
         msg.setdefault("thread_id", msg["id"])
         msg.setdefault("ts", _now())
+        msg.setdefault("type", "question")
+        wire = crypto.seal_body(msg, MY_PRIVKEY, PEER_PUBKEY) if ENC else msg
         req = urllib.request.Request(
-            RELAY_URL + "/ask", data=json.dumps(msg).encode(),
+            RELAY_URL + "/ask", data=json.dumps(wire).encode(),
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {RELAY_TOKEN}"}, method="POST")
         try:
@@ -110,6 +121,11 @@ class Handler(BaseHTTPRequestHandler):
             status = e.code
         except Exception as e:
             return self._send(502, {"ok": False, "body": f"relay unreachable: {e}"})
+        if ENC and crypto.is_sealed(reply):   # decrypt the reply body for our own agent
+            try:
+                reply = crypto.open_body(reply, MY_PRIVKEY, PEER_PUBKEY)
+            except Exception as e:
+                reply = {"ok": False, "body": f"reply decrypt failed: {e}"}
         _lf.log_exchange(
             trace_id=msg.get("thread_id") or msg["id"],
             name=f"{LOCAL_AGENT}->{PEER_AGENT}:{msg.get('type', 'question')}",

@@ -53,6 +53,14 @@ from zoneinfo import ZoneInfo
 
 import langfuse_emit as _lf
 
+# E2E body encryption (KN1) — optional. MY_PRIVKEY is this domain's X25519 private key; a peer
+# card's `pubkey` opts that edge into encryption. Import lazily so the gateway runs without
+# `cryptography` when no edge uses crypto.
+MY_PRIVKEY = os.environ.get("MY_PRIVKEY", "").strip()
+_crypto = None
+if MY_PRIVKEY:
+    import crypto as _crypto
+
 GW_BIND = os.environ.get("GW_BIND", "0.0.0.0:8095")
 GW_BEARER_TOKEN = os.environ.get("GW_BEARER_TOKEN", "").strip()
 OIDC_JWKS_URL = os.environ.get("OIDC_JWKS_URL", "").strip()
@@ -414,7 +422,17 @@ def _route(target, msg):
     if not card:
         return False, f"unknown target agent '{target}'", {"routed": False}
     url = card["endpoint"].rstrip("/") + "/ask"
-    body = json.dumps(msg).encode()
+    # E2E body encryption (KN1): when the card declares a `pubkey` and we hold our own private
+    # key (MY_PRIVKEY env), seal the body to the peer before it touches the relay, and open the
+    # reply. Cards without a pubkey (genie, cid, …) stay plaintext — gated, zero blast radius.
+    peer_pub = card.get("pubkey", "").strip()
+    enc = bool(peer_pub and MY_PRIVKEY)
+    wire = msg
+    if enc:
+        msg.setdefault("id", "")
+        msg.setdefault("thread_id", msg.get("id") or "")
+        wire = _crypto.seal_body(msg, MY_PRIVKEY, peer_pub)
+    body = json.dumps(wire).encode()
     # Cross-domain cards may carry their own endpoint bearer (per-domain credential) and a
     # pinned certificate (self-signed TLS on the peer's edge service).
     tok = os.environ.get(card.get("endpoint_token_env", ""), "").strip() or ENDPOINT_TOKEN
@@ -428,6 +446,11 @@ def _route(target, msg):
     try:
         with urllib.request.urlopen(req, timeout=ROUTE_TIMEOUT, context=ctx) as r:
             data = json.loads(r.read())
+        if enc and _crypto.is_sealed(data):
+            try:
+                data = _crypto.open_body(data, MY_PRIVKEY, peer_pub)
+            except Exception as e:
+                return False, f"reply decrypt failed: {e}", {"routed": True}
         return bool(data.get("ok", True)), data.get("body", ""), {
             "routed": True, "elapsed": round(time.time() - t0, 2),
             "peer_meta": data.get("meta"),

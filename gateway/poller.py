@@ -31,6 +31,16 @@ MAILBOX_URL = os.environ["MAILBOX_URL"].rstrip("/")
 MAILBOX_TOKEN = os.environ["MAILBOX_TOKEN"].strip()
 MAILBOX_CA = os.environ.get("MAILBOX_CA", "").strip()
 POLL_PATH = os.environ.get("POLL_PATH", "/outbox").strip()
+
+# E2E body encryption (KN1) — opt-in: set MY_PRIVKEY + PEER_PUBKEY to decrypt inbound asks and
+# encrypt outbound replies, so the relay only ever carries ciphertext. ENC_REQUIRE=1 refuses a
+# plaintext inbound on an encrypted edge. No keys set -> plaintext passthrough (unchanged).
+MY_PRIVKEY = os.environ.get("MY_PRIVKEY", "").strip()
+PEER_PUBKEY = os.environ.get("PEER_PUBKEY", "").strip()
+ENC = bool(MY_PRIVKEY and PEER_PUBKEY)
+ENC_REQUIRE = os.environ.get("ENC_REQUIRE", "").strip() in ("1", "true", "yes")
+if ENC:
+    import crypto
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://agent-gateway:8095").rstrip("/")
 # A domain WITHOUT a gateway (single agent) points the poller straight at its answerer:
 # GATEWAY_URL=http://127.0.0.1:8090 GATEWAY_PATH=/ask (the answerer's {ok,body,meta} response
@@ -56,7 +66,17 @@ def _req(url, body=None, bearer="", ctx=None, timeout=35):
 def handle(env):
     env["from"] = PEER_AGENT          # structural identity: this poller only ever speaks for its peer
     reply = None
-    if str(env.get("to", "")).strip() != LOCAL_AGENT:
+    if ENC:
+        if ENC_REQUIRE and not crypto.is_sealed(env):
+            reply = {"ok": False, "body": "unencrypted message refused on an encrypted edge"}
+        else:
+            try:                      # decrypt the inbound body before it reaches the answerer
+                env = crypto.open_body(env, MY_PRIVKEY, PEER_PUBKEY)
+            except Exception as e:
+                reply = {"ok": False, "body": f"decrypt failed: {e}"}
+    if reply is not None:
+        pass
+    elif str(env.get("to", "")).strip() != LOCAL_AGENT:
         reply = {"ok": False,
                  "body": f"refused: {PEER_AGENT}<->{LOCAL_AGENT} is the only granted edge"}
     else:
@@ -70,9 +90,17 @@ def handle(env):
             reply.setdefault("ok", False)
         except Exception as e:
             reply = {"ok": False, "body": f"gateway unreachable: {e}"}
+    if ENC:                           # encrypt the reply body back to the sender
+        reply.setdefault("id", env.get("id", ""))
+        reply.setdefault("thread_id", env.get("thread_id", env.get("id", "")))
+        try:
+            reply = crypto.seal_body(reply, MY_PRIVKEY, PEER_PUBKEY)
+        except Exception as e:
+            reply = {"ok": False, "body": f"reply encrypt failed: {e}",
+                     "id": env.get("id", "")}
     _req(MAILBOX_URL + "/reply", {"reply_to": env.get("id", ""), "reply": reply},
          MAILBOX_TOKEN, CTX, timeout=15)
-    print(f"relayed id={env.get('id')} type={env.get('type')} ok={reply.get('ok')}", flush=True)
+    print(f"relayed id={env.get('id')} type={env.get('type')} enc={ENC}", flush=True)
 
 
 def main():

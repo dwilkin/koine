@@ -6,7 +6,7 @@ RUN pip install --no-cache-dir "PyJWT[crypto]==2.9.0"
 
 # agents.json (agent cards + grants), lab_ca.crt, and certs/ are DOMAIN files —
 # the domain's deploy stage overlays them into the build context (this repo ships none).
-COPY gateway.py poller.py langfuse_emit.py agents.json lab_ca.crt /app/
+COPY gateway.py poller.py langfuse_emit.py crypto.py agents.json lab_ca.crt /app/
 COPY certs/ /app/certs/
 
 ENV STATE_DIR=/data
