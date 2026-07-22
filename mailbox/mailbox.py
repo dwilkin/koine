@@ -130,6 +130,7 @@ RELAY_REGISTRY = os.environ.get("RELAY_REGISTRY", "").strip()
 _TOKEN_TO_AGENT = {}          # sha256(token) -> agent name
 _AGENTS = set()               # all registered account names
 _EDGES = {}                   # frozenset({a,b}) -> {"types":set,"max_per_day","thread_depth","expires"}
+_registry_lock = threading.Lock()
 
 
 def _sha(t: str) -> str:
@@ -151,20 +152,37 @@ def _register_edge(a, b, types, max_per_day, thread_depth, expires):
 
 
 def _load_registry():
+    """(Re)build the account/edge tables from the registry file (or synthesized single-edge env).
+    Rebuilds into fresh dicts and swaps them atomically, so it is safe to call live (SIGHUP) while
+    requests are in flight — the koine.network control plane rewrites registry.json + signals to
+    add an account or edge without a restart."""
+    global _TOKEN_TO_AGENT, _AGENTS, _EDGES
+    t2a, agents, edges = {}, set(), {}
+
+    def reg_account(agent, token="", token_sha256=""):
+        agents.add(agent)
+        t2a[(token_sha256 or _sha(token))] = agent
+
+    def reg_edge(a, b, types, mpd, depth, expires):
+        edges[frozenset((a, b))] = {"types": set(types), "max_per_day": int(mpd),
+                                    "thread_depth": int(depth), "expires": expires or ""}
+
     if RELAY_REGISTRY:
         raw = RELAY_REGISTRY
         data = json.load(open(raw[1:])) if raw.startswith("@") else json.loads(raw)
         for acc in data.get("accounts", []):
-            _register_account(acc["agent"], acc.get("token", ""), acc.get("token_sha256", ""))
+            reg_account(acc["agent"], acc.get("token", ""), acc.get("token_sha256", ""))
         for e in data.get("edges", []):
             a, b = e["agents"]
-            _register_edge(a, b, e.get("types", ["question", "notification"]),
-                           e.get("max_per_day", 20), e.get("thread_depth", 6), e.get("expires", ""))
+            reg_edge(a, b, e.get("types", ["question", "notification"]),
+                     e.get("max_per_day", 20), e.get("thread_depth", 6), e.get("expires", ""))
     elif MODE == "relay":                 # single-edge, synthesized from env (backward compat)
-        _register_account(AGENT_A, TOKEN_A)
-        _register_account(AGENT_B, TOKEN_B)
-        _register_edge(AGENT_A, AGENT_B, GRANT_TYPES, GRANT_MAX_PER_DAY,
-                       GRANT_THREAD_DEPTH, GRANT_EXPIRES)
+        reg_account(AGENT_A, TOKEN_A)
+        reg_account(AGENT_B, TOKEN_B)
+        reg_edge(AGENT_A, AGENT_B, GRANT_TYPES, GRANT_MAX_PER_DAY,
+                 GRANT_THREAD_DEPTH, GRANT_EXPIRES)
+    with _registry_lock:                  # atomic swap
+        _TOKEN_TO_AGENT, _AGENTS, _EDGES = t2a, agents, edges
 
 
 def _edge_grant(a: str, b: str):
@@ -585,6 +603,17 @@ class LocalHandler(BaseH):
 def main():
     _init_db()
     _load_registry()
+    if MODE == "relay":                   # live registry reload (control plane adds accounts/edges)
+        import signal
+
+        def _reload(*_):
+            try:
+                _load_registry()
+                print(f"{SERVICE_NAME}: registry reloaded — {len(_AGENTS)} accounts, "
+                      f"{len(_EDGES)} edge(s)", flush=True)
+            except Exception as e:
+                print(f"{SERVICE_NAME}: registry reload FAILED ({e}); keeping current", flush=True)
+        signal.signal(signal.SIGHUP, _reload)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT_FILE, KEY_FILE)
     if MODE == "relay":
