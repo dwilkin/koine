@@ -42,6 +42,7 @@ import os
 import re
 import sqlite3
 import ssl
+import signal
 import sys
 import threading
 import time
@@ -667,6 +668,16 @@ def main():
     if not (GW_BEARER_TOKEN or _jwk_client):
         sys.exit("FATAL: configure GW_BEARER_TOKEN and/or OIDC_JWKS_URL for caller authn")
     _init_db()
+
+    def _reload_agents(*_):            # edge-sync rewrites agents.json + SIGHUPs -> hot-reload cards
+        global AGENTS
+        try:
+            AGENTS = _load_agents()
+            print(f"a2a-gateway: agents reloaded — {sorted(AGENTS.keys())}", flush=True)
+        except Exception as e:
+            print(f"a2a-gateway: agents reload FAILED ({e}); keeping current", flush=True)
+    signal.signal(signal.SIGHUP, _reload_agents)
+
     host, _, port = GW_BIND.rpartition(":")
     srv = ThreadingHTTPServer((host or "0.0.0.0", int(port)), Handler)
     print(f"a2a-gateway on {GW_BIND}; agents={sorted(AGENTS.keys())}; "

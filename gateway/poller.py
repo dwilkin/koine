@@ -47,8 +47,32 @@ GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://agent-gateway:8095").rstrip(
 # is posted back as the reply — shape-compatible with the gateway reply for the sender's client).
 GATEWAY_PATH = os.environ.get("GATEWAY_PATH", "/message").strip()
 GW_BEARER_TOKEN = os.environ["GW_BEARER_TOKEN"].strip()
-PEER_AGENT = os.environ["PEER_AGENT"].strip()          # whose mailbox this is — the forced `from`
 LOCAL_AGENT = os.environ.get("LOCAL_AGENT", "atlas").strip()
+
+# MULTI-PEER mode (a hub-account draining mail from MANY peers on one relay account — e.g. an
+# agent that auto-accepts connections): set PEERS_FILE=@/path.json = {"<agent>":{"pubkey":"…"}}.
+# Then this poller drains the WHOLE inbox (no from-filter) and routes each message by its REAL
+# sender: sender must be a KNOWN peer, and on an encrypted edge the body must DECRYPT with that
+# peer's pubkey — a valid decrypt authenticates `from` (a wrong sender can't be forged, X25519
+# static-static). The gateway re-checks the grant. Single-peer mode (PEER_AGENT set) is unchanged.
+PEERS_FILE = os.environ.get("PEERS_FILE", "").strip()
+MULTI = bool(PEERS_FILE)
+PEER_AGENT = os.environ.get("PEER_AGENT", "").strip()   # single mode: the forced `from`
+if MULTI and MY_PRIVKEY:
+    import crypto                                        # multi mode needs per-peer crypto
+_PEERS = {}
+
+
+def _load_peers():
+    global _PEERS
+    if not PEERS_FILE:
+        return
+    path = PEERS_FILE[1:] if PEERS_FILE.startswith("@") else PEERS_FILE
+    try:
+        _PEERS = json.load(open(path))
+    except Exception as e:
+        print(f"peers file unreadable ({path}): {e}", flush=True)
+
 
 CTX = ssl.create_default_context(cafile=MAILBOX_CA) if MAILBOX_CA \
     else ssl.create_default_context()
@@ -64,22 +88,38 @@ def _req(url, body=None, bearer="", ctx=None, timeout=35):
 
 
 def handle(env):
-    env["from"] = PEER_AGENT          # structural identity: this poller only ever speaks for its peer
+    # Resolve the sender + that edge's pubkey. SINGLE mode forces from=PEER_AGENT (this poller only
+    # ever speaks for its peer). MULTI mode takes the relay-stamped `from`, requires it to be a
+    # KNOWN peer, and authenticates it by decrypt (below).
+    if MULTI:
+        sender = str(env.get("from", "")).strip()
+        peer = _PEERS.get(sender)
+        if peer is None:
+            _reply_err(env, f"unknown sender '{sender}' (no synced edge)")
+            return
+        peer_pub = peer.get("pubkey", "")
+        enc_edge = bool(MY_PRIVKEY and peer_pub)
+    else:
+        sender = PEER_AGENT
+        env["from"] = sender          # structural identity for the single edge
+        peer_pub = PEER_PUBKEY
+        enc_edge = ENC
+
     reply = None
-    if ENC:
+    if enc_edge:
         if ENC_REQUIRE and not crypto.is_sealed(env):
             reply = {"ok": False, "body": "unencrypted message refused on an encrypted edge"}
         else:
-            try:                      # decrypt the inbound body before it reaches the answerer
-                env = crypto.open_body(env, MY_PRIVKEY, PEER_PUBKEY)
+            try:                      # a valid decrypt with the sender's pubkey AUTHENTICATES `from`
+                env = crypto.open_body(env, MY_PRIVKEY, peer_pub)
             except Exception as e:
-                reply = {"ok": False, "body": f"decrypt failed: {e}"}
+                reply = {"ok": False, "body": f"decrypt/auth failed: {e}"}
     if reply is not None:
         pass
     elif str(env.get("to", "")).strip() != LOCAL_AGENT:
-        reply = {"ok": False,
-                 "body": f"refused: {PEER_AGENT}<->{LOCAL_AGENT} is the only granted edge"}
+        reply = {"ok": False, "body": f"refused: not addressed to {LOCAL_AGENT}"}
     else:
+        env["from"] = sender          # authenticated sender handed to the gateway
         try:
             reply = _req(GATEWAY_URL + GATEWAY_PATH, env, GW_BEARER_TOKEN, timeout=230)
         except urllib.error.HTTPError as e:
@@ -90,21 +130,38 @@ def handle(env):
             reply.setdefault("ok", False)
         except Exception as e:
             reply = {"ok": False, "body": f"gateway unreachable: {e}"}
-    if ENC:                           # encrypt the reply body back to the sender
+    if enc_edge:                      # encrypt the reply body back to the sender
         reply.setdefault("id", env.get("id", ""))
         reply.setdefault("thread_id", env.get("thread_id", env.get("id", "")))
         try:
-            reply = crypto.seal_body(reply, MY_PRIVKEY, PEER_PUBKEY)
+            reply = crypto.seal_body(reply, MY_PRIVKEY, peer_pub)
         except Exception as e:
-            reply = {"ok": False, "body": f"reply encrypt failed: {e}",
-                     "id": env.get("id", "")}
+            reply = {"ok": False, "body": f"reply encrypt failed: {e}", "id": env.get("id", "")}
     _req(MAILBOX_URL + "/reply", {"reply_to": env.get("id", ""), "reply": reply},
          MAILBOX_TOKEN, CTX, timeout=15)
-    print(f"relayed id={env.get('id')} type={env.get('type')} enc={ENC}", flush=True)
+    print(f"relayed from={sender} id={env.get('id')} type={env.get('type')} enc={enc_edge}", flush=True)
+
+
+def _reply_err(env, msg):
+    """Post a plaintext error reply for an envelope we refuse before decrypt (unknown sender)."""
+    try:
+        _req(MAILBOX_URL + "/reply", {"reply_to": env.get("id", ""),
+             "reply": {"ok": False, "body": msg}}, MAILBOX_TOKEN, CTX, timeout=15)
+    except Exception:
+        pass
+    print(f"refused from={env.get('from')} id={env.get('id')}: {msg}", flush=True)
 
 
 def main():
-    print(f"koine-poller: {MAILBOX_URL}{POLL_PATH} -> {GATEWAY_URL}", flush=True)
+    _load_peers()
+    if MULTI:                          # hot-reload the peer set (edge-sync adds peers) on SIGHUP
+        import signal
+        signal.signal(signal.SIGHUP, lambda *_: (_load_peers(),
+                      print(f"koine-poller: peers reloaded — {len(_PEERS)} peer(s)", flush=True)))
+        print(f"koine-poller: MULTI {MAILBOX_URL}{POLL_PATH} -> {GATEWAY_URL} "
+              f"({len(_PEERS)} peers)", flush=True)
+    else:
+        print(f"koine-poller: {MAILBOX_URL}{POLL_PATH} -> {GATEWAY_URL}", flush=True)
     backoff = 1
     while True:
         try:
