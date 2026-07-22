@@ -15,6 +15,7 @@ User=koine
 Group=koine
 EnvironmentFile=/etc/koine-mailbox/mailbox.env
 ExecStart=/usr/bin/python3 /opt/koine/mailbox/mailbox.py
+ExecReload=/bin/kill -HUP $MAINPID   # relay mode: hot-reload the registry (add accounts/edges)
 Restart=on-failure
 RestartSec=3
 ProtectSystem=strict
