@@ -1,51 +1,43 @@
-# agent-gateway — central A2A hub (Phase 2)
+# gateway — a Koine domain's policy enforcement point
 
-The routing + safety layer between the initiating agent's `ask_peer` MCP tool and the
-recipient agent's always-on answer-endpoint (`agent-endpoint/`, `:8090 /ask`). Runs as a
-Docker stack on **infra-host** (`http://192.0.2.10:8095`). Plan:
-`~/.claude/plans/crystalline-growing-quail.md`.
+The routing + safety layer between an initiating agent's `ask_peer` MCP tool and a recipient
+agent's answerer (`endpoint/`, `/ask`). One gateway per **trust domain** (SPEC.md §2). Runs as a
+container; stdlib + `PyJWT[crypto]` (OIDC) + optional `cryptography` (E2E).
 
 ## Flow
 ```
 initiator agent (live turn)
-  └─ ask_peer(to, body, type)  → POST /message (Bearer: Keycloak JWT or gateway token)
-       gateway: authn · identity-bind · caps (thread-depth/rate/cooldown) · AUDIT (SQLite)
-                · notify (Telegram on action_request/escalation) · route → peer /ask
-       ← synchronous reply  ← peer answer-endpoint spawns `claude -p` (full context + guard hooks)
+  └─ ask_peer(to, body, type)  → POST /message   (Bearer: OIDC JWT or gateway token)
+       gateway: authn · identity-bind · grant/caps (types·rate·thread-depth) · AUDIT
+                · notify (human on action_request) · route → peer /ask (or its mailbox)
+       ← synchronous reply  ← the peer's answerer produces it
 ```
 
 ## Endpoints
-- `POST /message` — relay an A2A message `{from,to,type,body,thread_id?,id?}`. Authn required.
-- `GET  /health`  — status, known agents, whether OIDC is on, kill-switch state.
+- `POST /message` — relay an envelope `{from,to,type,body,thread_id?,id?}` (SPEC §3). Authn required.
+- `GET  /health`  — status, known agents, OIDC on/off, kill-switch state.
 - `GET  /agents`  — the agent-card directory (`agents.json`).
-- `GET  /audit?limit=N` — recent audit rows (gateway bearer required). Darian-readable log.
+- `GET  /audit?limit=N` — recent audit rows (gateway bearer). The operator's log.
 
 ## AuthN
-- **Preferred:** Keycloak (infra-host `workloads` realm) JWT — dedicated confidential clients
-  `agent-atlas` / `agent-genie` (client_credentials). `azp` claim → agent identity, and the
-  message `from` must match it (no peer-spoofing).
-- **Bootstrap/fallback:** a shared `GW_BEARER_TOKEN` (Vault `secret/<mount>/agent-gateway`). With
-  the bearer, identity is taken from the body's `from` (trusted caller). Set `OIDC_JWKS_URL`
-  to enable JWT mode; keep the bearer for `GET /audit` (Darian's ops read).
+- **Preferred:** per-agent OIDC confidential clients (client_credentials → RS256 JWT). The `azp`
+  claim maps to the agent, and the message `from` MUST match it — no peer-spoofing (SPEC §8).
+- **Bootstrap/fallback:** a shared `GW_BEARER_TOKEN`; with it, identity is the body's `from`
+  (trusted caller). Set `OIDC_JWKS_URL` to enable JWT mode.
 
-## Safety
-- **Audit:** every request/reply/refusal persisted to SQLite (`/data/audit.db`, named volume).
-- **Loop cap:** `MAX_THREAD_DEPTH` requests per `thread_id`. Answerers don't get `ask_peer`
-  (endpoint `--disallowedTools`) so they can't recurse; the depth cap is defense-in-depth.
-- **Rate cap:** `MAX_MSGS_PER_HOUR` per initiator + optional `COOLDOWN_SECONDS`.
-- **Notify:** `action_request` / `escalation` → Telegram to the recipient's human (best-effort).
-- **Kill switch:** `touch /data/DISABLED` (or `docker stop agent-gateway`) severs all traffic.
+## Safety (SPEC §5)
+- **Audit:** every request/reply/refusal persisted to SQLite (`$STATE_DIR/audit.db`).
+- **Grants + caps:** per-edge types/rate; `MAX_THREAD_DEPTH` per `thread_id`; `MAX_MSGS_PER_HOUR`
+  + optional `COOLDOWN_SECONDS`. Answerers don't get `ask_peer`, so they can't recurse.
+- **E2E (KN1/§8a):** set `MY_PRIVKEY`; a peer card's `pubkey` opts that edge into encryption —
+  the body is sealed before it leaves this domain and the reply is opened on return.
+- **Notify:** `action_request`/`escalation` → the recipient's human (best-effort, configurable).
+- **Kill switch:** `touch $STATE_DIR/DISABLED` severs all traffic.
 
-## Deploy / operate
-```bash
-~/lab/stacks/agent-gateway/deploy.sh            # from agent-host: Vault→.env, sync, up --build, health
-ssh claude@192.0.2.10 'docker logs --tail 40 agent-gateway'
-curl -s http://192.0.2.10:8095/health | python3 -m json.tool
-# kill switch:
-ssh claude@192.0.2.10 'docker exec agent-gateway touch /data/DISABLED'   # re-enable: rm it
-```
-
-## Secrets (Vault)
-- `secret/<mount>/agent-gateway` — `gw_bearer_token` (+ later `oidc_jwks_url`/`oidc_issuer`/`oidc_audience`).
-- `secret/<mount>/agent-endpoint` — `token` (bearer the gateway uses to call the peers' `/ask`).
-- `secret/<mount>/telegram` — `bot_token`, `chat_darian`, `chat_marie` (Phase 4; notify off until set).
+## Config (environment)
+`GW_BIND` · `GW_BEARER_TOKEN` · `OIDC_JWKS_URL`/`OIDC_ISSUER`/`OIDC_AUDIENCE` · `AGENTS_JSON`
+(cards+grants) · `ENDPOINT_TOKEN` (bearer for peers' `/ask`) · `MAX_THREAD_DEPTH` · `MAX_MSGS_PER_HOUR`
+· `COOLDOWN_SECONDS` · `ROUTE_TIMEOUT` · `DOMAIN` (observability label) · `MY_PRIVKEY` (E2E) ·
+`BRIDGE_NOTE_URL` (optional chat-bridge history) · `STATE_DIR`. `agents.json`, certs, and all
+secrets are **domain data** — the operating domain overlays them at deploy (see the domain's own
+ops repo). This repo ships none.

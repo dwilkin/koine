@@ -16,12 +16,12 @@ peer (live turn) --POST /ask--> [agent-endpoint] --spawn--> claude -p (full cont
 ## Layout
 - `endpoint.py` — the daemon (stdlib `ThreadingHTTPServer`; no pip deps).
 - `run.sh` — launcher: reads the bearer token from Vault into the env, then exec's the daemon.
-- `agent-endpoint.service` — `systemd --user` unit (agent-host/Atlas values; peer-host overrides noted inline).
+- `agent-endpoint.service` — `systemd --user` unit template (set per-agent values via env).
 - This README.
 
 ## Security model (Phase 1)
 - **Auth:** every `POST /ask` needs `Authorization: Bearer <token>`; token in Vault
-  `secret/<mount>/agent-endpoint`, injected by `run.sh` (never on disk / in the unit). Constant-time compare.
+  your secret store, injected by `run.sh` (never on disk / in the unit). Constant-time compare.
 - **Answerer posture:** *full-capability + hook-gating* (Darian's call 2026-07-02). The spawned
   `claude -p` inherits the host agent's full tool permissions; destructive/outbound actions are
   stopped by the existing **PreToolUse guard hooks**, not by tool restriction. Because of that,
@@ -37,7 +37,7 @@ peer (live turn) --POST /ask--> [agent-endpoint] --spawn--> claude -p (full cont
   every ask/answer/auth-reject/busy event, Darian-readable. (Phase 2 adds the central gateway's
   SQLite audit; this local log stays as a per-host record. Register it in BACKUP_PLAN.md in Phase 4.)
 
-> Phase 1 is directly callable (bearer auth). Phase 2 puts the **central A2A gateway** (infra-host) in
+> Phase 1 is directly callable (bearer auth). Phase 2 puts the domain **gateway** in
 > front for Keycloak authn, rate/loop caps, policy routing, and the agent-card directory.
 
 ## Message schema (A2A-inspired)
@@ -51,45 +51,20 @@ num_turns, session_id).
 
 `GET /health` → `{"status":"ok","agent":"atlas","disabled":false}`.
 
-## Deploy (agent-host / Atlas)
+## Deploy
+The daemon runs the same everywhere; only per-domain config differs. Install the systemd `--user`
+unit (`agent-endpoint.service`), set `AGENT_NAME`/`WORKDIR`/`CLAUDE_BIN` + the bearer, and start it:
 ```bash
-# repo is source of truth; the unit runs the code straight from ~/lab/agent-endpoint
-cp ~/lab/agent-endpoint/agent-endpoint.service ~/.config/systemd/user/
-chmod +x ~/lab/agent-endpoint/run.sh
-systemctl --user daemon-reload
-systemctl --user enable --now agent-endpoint
-systemctl --user status agent-endpoint --no-pager
-curl -s http://127.0.0.1:8090/health
+cp agent-endpoint.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+systemctl --user enable --now agent-endpoint && curl -s http://127.0.0.1:8090/health
 ```
+The bearer (`AUTH_TOKEN`) comes from `run.sh` (fetches it from your secret store) OR a 0600
+`EnvironmentFile` if the host has no vault reach — never on disk in the unit. A domain with
+multiple agents deploys one unit per agent (distinct `AGENT_NAME`/`WORKDIR`). Domain-specific
+deploy steps, secret paths, and host wiring live in that domain's own ops repo, not here.
 
-## Deploy (peer-host / Genie) — as-built 2026-07-02
-Same `endpoint.py`, deployed as user `genie` to `/home/genie/agent-endpoint/`. `genie` has **no
-Vault token**, so instead of `run.sh` the token is delivered by an **EnvironmentFile** that Atlas
-provisions from Vault (Darian's choice 2026-07-02): keeps Genie lean (one bearer token, no Vault
-reach). `genie` already has linger enabled.
-
-```bash
-# from agent-host (Atlas has Vault): write the token to a 600 env file on peer-host (token via stdin)
-TOK=$(curl -sk -H "X-Vault-Token: $(cat ~/.vault-token)" \
-  https://192.0.2.10:8200/v1/secret/data/lab/agent-endpoint \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['data']['token'])")
-printf 'AUTH_TOKEN=%s\n' "$TOK" | ssh root@192.0.2.10 \
-  'umask 077; cat > /home/genie/.config/agent-endpoint.env \
-   && chown genie:genie /home/genie/.config/agent-endpoint.env'
-unset TOK
-```
-Genie's unit differs from agent-host's only in: `AGENT_NAME=genie`, `WORKDIR=/home/genie`,
-`CLAUDE_BIN=/home/genie/.local/bin/claude`, `EnvironmentFile=/home/genie/.config/agent-endpoint.env`,
-and `ExecStart=/usr/bin/python3 /home/genie/agent-endpoint/endpoint.py` (no `run.sh`). Enable it as
-`genie` from a root shell on peer-host (no `sudo` there):
-```bash
-GUID=$(id -u genie)
-runuser -u genie -- env XDG_RUNTIME_DIR=/run/user/$GUID \
-  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$GUID/bus \
-  systemctl --user enable --now agent-endpoint
-```
-To rotate the token: rewrite the env file (above) + update Vault, then `systemctl --user restart
-agent-endpoint` for genie and `systemctl --user restart agent-endpoint` on agent-host.
+The peer-facing daemon should run SANDBOXED (unprivileged user, no state-changing tools, no
+secrets reachable) — SPEC §6.2; the human control channel stays a separate, fuller daemon.
 
 ## Config (env — set in the unit)
 | Var | Default | Meaning |
@@ -107,5 +82,5 @@ agent-endpoint` for genie and `systemctl --user restart agent-endpoint` on agent
 | `STATE_DIR` | `~/.local/share/agent-endpoint` | audit + kill switch |
 
 ## Cost note
-Each answer is a cold `claude -p` (~$0.13 on agent-host's context, ~3.6–7s). `MODEL=sonnet` keeps it
+Each answer is a cold `claude -p` (~$0.13 on a warm context, ~3.6–7s). `MODEL=sonnet` keeps it
 down; watch `meta.cost_usd` in the audit log.

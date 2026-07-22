@@ -31,7 +31,7 @@ agents talking, step by step.
 | Dir | What | Runs where |
 |---|---|---|
 | `docs/` | The normative spec (`koine/1`) | — |
-| `gateway/` | The domain gateway: authn (OIDC JWT / bearer), grant + cap enforcement, audit, routing, mailbox pollers, kill switch, LangFuse emitter | one per domain (Docker; the lab's runs on infra-host) |
+| `gateway/` | The domain gateway: authn (OIDC JWT / bearer), grant + cap enforcement, audit, routing, mailbox pollers, kill switch, LangFuse emitter | one per domain (Docker) |
 | `endpoint/` | The per-agent answerer: `/ask` daemon, machine lane, pending-actions ledger, redaction/tripwires; systemd units for both the full-context human-channel daemon and the sandboxed peer daemon (Phase-B pattern) | every agent host |
 | `askpeer/` | The `ask_peer` MCP stdio server — the reference **send** client | every initiating agent |
 | `mailbox/` | The **recommended default transport**: a public store-and-forward rendezvous for one edge (peer polls outbound; no inbound hole at home) | a domain that accepts inbound (or the koine.network service) |
@@ -53,7 +53,7 @@ pattern with its own ops repo.
 ## Versioning
 
 - Protocol: `koine/1` (see spec §0 — additive within a major; receivers ignore unknown fields).
-- Applications declare `depends: a2a >= N`. First reference app: **Caldera**
+- Applications declare `depends: koine >= N`. First reference app: **Caldera**
   (`dwilkin/Caldera`, `caldera/v1` — GPU rental as a `coord` extension).
 
 ## Tests
@@ -65,7 +65,7 @@ checks (the lab: Gatus probes + guard-hook suite).
 ## Roadmap (extraction plan E2/E3)
 
 - **E2** — shared capability lib: the declarative node-capability descriptor + reconciler
-  (today in Caldera's worker) extracts here as a library both A2A and apps import.
+  (today in Caldera's worker) extracts here as a library both Koine and apps import.
 - **E3** — config marketplace: an optional, grant-governed registry of tested capability
   descriptors agents fetch by `applies_to` hardware. Rides the same envelope/transport;
   never mandatory, never authoritative (spec §1).

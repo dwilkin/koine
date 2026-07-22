@@ -82,7 +82,7 @@ if __name__ == "__main__":
         ("assign", "password = hunter2secret", True, "assignment"),
         ("privkey", KEY + " blah", True, "private_key_block"),
         ("git sha (must NOT trip)", "commit db09ace2f1a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2", False, None),
-        ("plain prose (must NOT trip)", "infra-host is up and healthy on 192.0.2.10", False, None),
+        ("plain prose (must NOT trip)", "host-7 is up and healthy on 10.0.0.5", False, None),
     ]
     ok = True
     for name, text, should, label in checks:

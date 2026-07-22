@@ -67,6 +67,7 @@ GW_BEARER_TOKEN = os.environ.get("GW_BEARER_TOKEN", "").strip()
 OIDC_JWKS_URL = os.environ.get("OIDC_JWKS_URL", "").strip()
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").strip()
 OIDC_AUDIENCE = [a for a in os.environ.get("OIDC_AUDIENCE", "").split(",") if a.strip()]
+DOMAIN = os.environ.get("DOMAIN", "").strip()   # observability label for THIS domain
 AGENTS_JSON = os.environ.get("AGENTS_JSON", "/app/agents.json")
 ENDPOINT_TOKEN = os.environ.get("ENDPOINT_TOKEN", "").strip()
 MAX_THREAD_DEPTH = int(os.environ.get("MAX_THREAD_DEPTH", "6"))
@@ -80,7 +81,7 @@ NOTIFY_TZ = os.environ.get("NOTIFY_TZ", "America/Denver")
 # Bridge history hook: record proactive sends so the human's reply has context. The gateway
 # container is on a bridge network, so it reaches the telegram-bridge via the host's published
 # port, not 127.0.0.1.
-BRIDGE_NOTE_URL = os.environ.get("BRIDGE_NOTE_URL", "http://192.0.2.10:8096/note").strip()
+BRIDGE_NOTE_URL = os.environ.get("BRIDGE_NOTE_URL", "").strip()  # optional; a domain that runs a chat bridge sets it
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()  # shared fallback
 # Per-recipient bot token (Darian's Atlas bot vs Marie's Genie bot) — each falls back to the
 # shared token so one bot works for both until a separate Genie-branded bot exists.
@@ -652,7 +653,7 @@ class Handler(BaseHTTPRequestHandler):
         _lf.log_exchange(
             trace_id=msg["thread_id"], name=f"{sender}->{target}:{mtype}",
             sender=sender, target=target, mtype=mtype,
-            body=msg.get("body", ""), reply=reply, ok=ok, domain="wilkin-lab",
+            body=msg.get("body", ""), reply=reply, ok=ok, domain=DOMAIN,
             latency_ms=int(meta.get("elapsed", 0) * 1000) if meta.get("elapsed") else None,
             cost_usd=peer_meta.get("cost_usd"),
             extra={"num_turns": peer_meta.get("num_turns")} if peer_meta.get("num_turns") else None)

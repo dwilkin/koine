@@ -4,11 +4,11 @@
 # baked into the systemd unit — it lives only in this process's env.
 #
 # Non-secret config (AGENT_NAME, WORKDIR, MODEL, ENDPOINT_BIND, ...) comes from the
-# systemd unit's Environment= lines. On hosts without agent-host's Vault token you can instead
+# systemd unit's Environment= lines. On hosts without a vault token you can instead
 # export AUTH_TOKEN before starting (see README) and this Vault read is skipped.
 set -euo pipefail
 
-VAULT="${VAULT_ADDR:-https://192.0.2.10:8200}"
+VAULT="${VAULT_ADDR:-}"   # your vault address; set in env/.env
 VAULT_TOKEN_FILE="${VAULT_TOKEN_FILE:-$HOME/.vault-token}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
