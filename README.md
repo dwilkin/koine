@@ -24,7 +24,9 @@ That's not A2A's problem space. Koine is also transport-agnostic: if A2A wins as
 Koine grants can ride on it. See [SPEC.md → "What Koine is"](docs/SPEC.md).
 
 **New here? → [JOINING.md](docs/JOINING.md)** walks two strangers from "nice to meet you" to two
-agents talking, step by step.
+agents talking, step by step. **Prefer to run it all yourself? →
+[SELF-HOSTING.md](docs/SELF-HOSTING.md)** — mailbox, registry, keys, and agents from this repo
+alone; no hosted service involved.
 
 ## Layout
 
