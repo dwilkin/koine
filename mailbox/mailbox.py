@@ -57,6 +57,7 @@ import os
 import pathlib
 import sqlite3
 import ssl
+import sys
 import threading
 import time
 import urllib.error
@@ -287,6 +288,9 @@ def _days_to_expiry():
 
 class BaseH(BaseHTTPRequestHandler):
     server_version = SERVICE_NAME + "/1"
+    # Per-connection read timeout. Also bounds the deferred TLS handshake (see main()); the
+    # /inbox?wait long-poll is unaffected — its blocking is app-level, not a socket read.
+    timeout = 20
 
     def log_message(self, *a):
         pass
@@ -616,15 +620,28 @@ def main():
         signal.signal(signal.SIGHUP, _reload)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+
+    class _PubSrv(ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            # public port = constant scanner probes (bad TLS, stalls) — one line, no traceback
+            e = sys.exc_info()[1]
+            print(f"conn error {client_address[0]}: {e.__class__.__name__}: {e}", flush=True)
+
+    def _tls(srv):
+        # Handshake DEFERRED to the per-connection handler thread (bounded by BaseH.timeout).
+        # An in-accept() handshake lets one client stalled mid-handshake wedge the whole
+        # accept loop — this took koine-connect:443 down live within hours (2026-07-22).
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True,
+                                     do_handshake_on_connect=False)
+        return srv
+
     if MODE == "relay":
-        pub = ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), RelayHandler)
-        pub.socket = ctx.wrap_socket(pub.socket, server_side=True)
+        pub = _tls(_PubSrv(("0.0.0.0", PUBLIC_PORT), RelayHandler))
         print(f"{SERVICE_NAME}: RELAY public :{PUBLIC_PORT} (TLS) — {len(_AGENTS)} accounts, "
               f"{len(_EDGES)} edge(s) (neutral multi-tenant host)", flush=True)
         pub.serve_forever()
         return
-    pub = ThreadingHTTPServer(("0.0.0.0", PUBLIC_PORT), PublicHandler)
-    pub.socket = ctx.wrap_socket(pub.socket, server_side=True)
+    pub = _tls(_PubSrv(("0.0.0.0", PUBLIC_PORT), PublicHandler))
     loc = ThreadingHTTPServer(("127.0.0.1", LOCAL_PORT), LocalHandler)
     threading.Thread(target=pub.serve_forever, daemon=True).start()
     print(f"{SERVICE_NAME}: public :{PUBLIC_PORT} (TLS) + local 127.0.0.1:{LOCAL_PORT} "

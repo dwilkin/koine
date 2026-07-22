@@ -80,6 +80,17 @@ def main():
         check("mode=relay", b.get("mode") == "relay")
         check("both inboxes present", set(b.get("inbox", {})) == {"athena", "nova"})
 
+        print("stalled TLS client must not wedge the accept loop (2026-07-22 outage):")
+        import socket
+        stalls = [socket.create_connection(("127.0.0.1", PORT)) for _ in range(3)]
+        try:                              # raw TCP open, no TLS bytes ever sent — a scanner stall
+            time.sleep(0.3)
+            s, b = req("GET", "/health", timeout=8)
+            check("server still answers with 3 stalled connections open", s == 200)
+        finally:
+            for st in stalls:
+                st.close()
+
         print("auth:")
         check("no token -> 401", req("GET", "/inbox", token=None)[0] == 401)
         check("bad token -> 401", req("GET", "/inbox", token="nope")[0] == 401)
