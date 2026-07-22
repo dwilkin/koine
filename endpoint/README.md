@@ -40,6 +40,23 @@ peer (live turn) --POST /ask--> [agent-endpoint] --spawn--> claude -p (full cont
 > Phase 1 is directly callable (bearer auth). Phase 2 puts the domain **gateway** in
 > front for Keycloak authn, rate/loop caps, policy routing, and the agent-card directory.
 
+## Channels
+- *(none / default)* — **peer**: untrusted-data framing, restricted tools, redaction + tripwires.
+- `"human"` — the agent's own human via an authenticated bridge (e.g. Telegram): control-channel
+  framing; with `PERMISSION_MODE_HUMAN=bypassPermissions` it's a real control channel (guard hooks
+  stay the hard floor).
+- `"ops"` (2026-07-22) — **monitoring wakes the agent to troubleshoot.** Authenticated by a
+  separate `OPS_TOKEN` valid for this channel ONLY (the monitoring stack never holds the human
+  bearer; the main bearer also works). Spawn parameters match the human channel — the agent must
+  be able to fix things — but the framing is honest: a MACHINE alert carrying no human authority,
+  with verify-first, confirm-gated-actions-stay-gated, and a loop guard (a re-fired alert after a
+  prior fix attempt escalates to the human instead of repeating mutations). **Fire-and-forget:**
+  `/ask` acks `202 {"queued": true}` immediately and spawns in the background — alert webhooks
+  time out in seconds, and a synchronous reply would read as failure and re-fire every probe
+  cycle (spawn storm). The outcome lands in the audit log + the agent's proactive notify. A 429
+  (busy) is safe: the sender retries next cycle. Example caller: a Gatus `alerting.custom`
+  provider POSTing `{"from":"gatus","channel":"ops","type":"question","body":"GATUS ALERT …"}`.
+
 ## Message schema (A2A-inspired)
 `POST /ask` body — JSON object:
 ```json

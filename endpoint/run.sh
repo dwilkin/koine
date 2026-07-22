@@ -18,5 +18,13 @@ if [[ -z "${AUTH_TOKEN:-}" ]]; then
     | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['data']['token'])")"
   export AUTH_TOKEN
 fi
+# Optional ops-channel bearer (monitoring wake-ups); absent field -> ops stays disabled.
+if [[ -z "${OPS_TOKEN:-}" ]]; then
+  OPS_TOKEN="$(curl -sk -H "X-Vault-Token: $(cat "$VAULT_TOKEN_FILE")" \
+    "$VAULT/v1/secret/data/lab/agent-endpoint" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['data'].get('ops_token',''))" \
+    2>/dev/null || true)"
+  export OPS_TOKEN
+fi
 
 exec python3 "$HERE/endpoint.py"
