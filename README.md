@@ -60,9 +60,11 @@ pattern with its own ops repo.
 
 ## Tests
 
-All stdlib, no deps — five files:
+All stdlib, no deps — six files:
 
 - `python3 test_crypto.py` — E2E envelope crypto (repo root).
+- `python3 gateway/test_grant_check.py` — SPEC §5 grant hard-field enforcement
+  (types / max_per_day / thread_depth / expires).
 - `cd endpoint && python3 test_machine_lane.py && python3 test_escalation.py` — answerer
   machine lane + model-escalation policy.
 - `cd mailbox && python3 test_relay.py && python3 test_multitenant.py` — relay contract +

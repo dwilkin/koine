@@ -329,10 +329,10 @@ def _msgs_last_day_edge(agent):
         return r["n"] if r else 0
 
 
-def _grant_check(sender, target, mtype):
+def _grant_check(sender, target, mtype, thread_id=""):
     """Peering-grant enforcement (SPEC.md §5): agents whose card carries a `grant`
-    are cross-domain edges — types/rate/expiry are hard limits, enforced before any spawn.
-    Returns None if OK, else (code, reason)."""
+    are cross-domain edges — types/rate/thread-depth/expiry are hard limits, enforced
+    before any spawn. Returns None if OK, else (code, reason)."""
     for edge_agent in (sender, target):
         g = AGENTS.get(edge_agent, {}).get("grant")
         if not g:
@@ -349,6 +349,13 @@ def _grant_check(sender, target, mtype):
         if _msgs_last_day_edge(edge_agent) >= cap:
             _propose_cap_raise(edge_agent, cap)
             return 429, f"peering-grant rate cap reached ({cap}/day on the '{edge_agent}' edge)"
+        # Per-grant thread depth (SPEC §5 hard field; mirrors the mailbox's _grant_gate).
+        # The global MAX_THREAD_DEPTH still applies via _cap_check — this only bites when
+        # the grant sets a tighter limit than the global.
+        depth = int(g.get("thread_depth", 6))
+        if thread_id and _thread_depth(thread_id) >= depth:
+            return 429, (f"thread-depth cap reached ({depth} on the '{edge_agent}' "
+                         "peering grant) — start a new thread or have a human continue")
     return None
 
 
@@ -648,7 +655,8 @@ class Handler(BaseHTTPRequestHandler):
         msg.setdefault("thread_id", msg["id"])
         msg.setdefault("ts", _now())
 
-        cap = _cap_check(sender, msg["thread_id"]) or _grant_check(sender, target, mtype)
+        cap = (_cap_check(sender, msg["thread_id"])
+               or _grant_check(sender, target, mtype, msg["thread_id"]))
         if cap:
             code, reason = cap
             _audit("refused", msg, ok=0, meta={"reason": reason, **auth_meta})

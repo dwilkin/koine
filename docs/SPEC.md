@@ -78,7 +78,7 @@ A message is a JSON object:
 |---|---|---|
 | `from` | MUST | sender agent name (gateway-verified: MUST match authenticated identity) |
 | `to` | MUST | target agent name |
-| `type` | MUST | `question` \| `notification` \| `action_request` (§4) |
+| `type` | MUST | `question` \| `notification` \| `action_request` \| `escalation` (§4); `answer` is reply-only — it MUST NOT initiate a thread, but is a valid envelope type when a reply transits an asynchronous transport (e.g. a relay inbox) |
 | `body` | MUST | the content: free text, or a structured extension body (§7) |
 | `id` | SHOULD | sender-minted message id |
 | `thread_id` | MUST at initiation | mint at initiation, echo unchanged on every subsequent message of the exchange (defaults to `id` if omitted mid-thread) |
@@ -100,6 +100,11 @@ machine_lane, …).
   MUST NOT execute it in-band: it lands in the target agent's pending-actions ledger and only
   the target's own human clears it (approval via the target domain's control channel). The
   reply to an action_request is an acknowledgment of *recording*, never of execution.
+- **`escalation`** — flags a matter needing the *recipient's human's* attention promptly
+  (an incident, a blocked approval, a safety concern). Notify-class like `action_request`
+  (the receiving domain SHOULD page its human out-of-band), but carries no recordable action
+  and confers no authority — it is a louder notification, not a privileged channel. Domains
+  SHOULD rate-limit it independently and MAY exclude it from a grant's `types`.
 
 ## 5. Grants (normative)
 
