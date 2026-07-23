@@ -88,6 +88,11 @@ if MY_PRIVKEY:
 
 GW_BIND = os.environ.get("GW_BIND", "0.0.0.0:8095")
 GW_BEARER_TOKEN = os.environ.get("GW_BEARER_TOKEN", "").strip()
+# KO-M3: read-only /audit credential, split from the submission bearer so an audit
+# reader no longer also holds submit-as-any-agent. When set, /audit requires THIS
+# token and no longer accepts GW_BEARER_TOKEN; unset = legacy (audit falls back to the
+# submission bearer) so a deploy that hasn't provisioned it yet keeps working.
+AUDIT_TOKEN = os.environ.get("AUDIT_TOKEN", "").strip()
 OIDC_JWKS_URL = os.environ.get("OIDC_JWKS_URL", "").strip()
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").strip()
 OIDC_AUDIENCE = [a for a in os.environ.get("OIDC_AUDIENCE", "").split(",") if a.strip()]
@@ -597,8 +602,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def _authed_readonly(self):
-        # /audit is readable with the gateway bearer (Darian's ops token).
-        return bool(GW_BEARER_TOKEN) and hmac.compare_digest(_bearer(self.headers), GW_BEARER_TOKEN)
+        # KO-M3: prefer the dedicated read-only AUDIT_TOKEN; a holder of it can read
+        # /audit but cannot submit (it's not a valid _identify bearer). Fall back to the
+        # submission bearer only when no AUDIT_TOKEN is provisioned (legacy).
+        tok = _bearer(self.headers)
+        if AUDIT_TOKEN:
+            return hmac.compare_digest(tok, AUDIT_TOKEN)
+        return bool(GW_BEARER_TOKEN) and hmac.compare_digest(tok, GW_BEARER_TOKEN)
 
     def _do_notify(self):
         """Proactive agent->human send. SELF-NOTIFY ONLY: an agent may message only its own
