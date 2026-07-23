@@ -30,10 +30,21 @@ caller (gateway/bridge) --POST /ask--> [answer-endpoint] --spawn--> claude -p (f
 - **Auth:** every `POST /ask` needs `Authorization: Bearer <token>`; the token lives in your
   secret store and is injected into the process env by `run.sh` (never on disk / in the unit).
   Constant-time compare. A separate `OPS_TOKEN` may authenticate the ops channel only.
-- **Answerer posture:** *full-capability + hook-gating*. The spawned `claude -p` inherits the
-  host agent's tool permissions; destructive/outbound actions are stopped by the existing
-  **PreToolUse guard hooks**, not by tool restriction alone. Because of that, the compensating
-  controls below are load-bearing.
+- **Answerer posture — SANDBOXED IS THE DEFAULT.** Run the PEER-facing daemon as a separate
+  **unprivileged, sandboxed user** (the `agent-peer-endpoint.service` pattern: dedicated
+  system user, `ProtectHome`/`ProtectSystem=strict`, a curated WORKDIR with **no credentials
+  reachable**, its own scoped API key, `REFUSE_HUMAN_CHANNEL=1`). This is the recommended
+  path for **every** peer answerer — self-hosters and new agents should start here, and the
+  human/ops channels stay on a separate full-context daemon. The single privileged
+  full-context daemon serving peers directly is a **fallback only**, and only acceptable
+  when that daemon's user cannot reach real secrets: guard hooks are Bash-only, so the
+  spawned answerer can still `Read` anything its user can — on the fallback path the
+  compensating controls below (tool disallow list, redaction, tripwire) are load-bearing
+  backstops, not walls.
+- **Phase C note:** an agent whose peer answers need live scoped data (e.g. a calendar)
+  should be given a **narrow capability inside the sandbox** (a read-only proxy/gateway for
+  exactly that data source), not the privileged fallback path — "needs one credential" never
+  justifies full-context peer answering.
 - **Untrusted-input framing:** a peer's text is handed to the answerer as UNTRUSTED DATA between
   fences, explicitly *not* as instructions that can override CLAUDE.md / guard rails.
 - **No recursion:** peer spawns are launched with `--disallowedTools` including the `ask_peer`
@@ -59,10 +70,14 @@ caller (gateway/bridge) --POST /ask--> [answer-endpoint] --spawn--> claude -p (f
   stay the hard floor).
 - `"ops"` — **monitoring wakes the agent to troubleshoot.** Authenticated by a
   separate `OPS_TOKEN` valid for this channel ONLY (the monitoring stack never holds the human
-  bearer; the main bearer also works). Spawn parameters match the human channel — the agent must
-  be able to fix things — but the framing is honest: a MACHINE alert carrying no human authority,
-  with verify-first, confirm-gated-actions-stay-gated, and a loop guard (a re-fired alert after a
-  prior fix attempt escalates to the human instead of repeating mutations). **Fire-and-forget:**
+  bearer; the main bearer also works). Ops spawns keep the human-channel **model/timeout** (the
+  wake must be able to diagnose) but run the **restricted tool profile** (KO-M2): never
+  `bypassPermissions`, the peer disallowed set, and `--allowedTools` = the pending-actions
+  ledger — the wake investigates and RECORDS a proposed fix for the human to approve rather
+  than auto-executing privileged mutations. The framing is honest: a MACHINE alert carrying no
+  human authority, with verify-first, confirm-gated-actions-stay-gated, and a loop guard (a
+  re-fired alert after a prior fix attempt escalates to the human instead of repeating
+  mutations). **Fire-and-forget:**
   `/ask` acks `202 {"queued": true}` immediately and spawns in the background — alert webhooks
   time out in seconds, and a synchronous reply would read as failure and re-fire every probe
   cycle (spawn storm). The outcome lands in the audit log + the agent's proactive notify. A 429
@@ -95,8 +110,11 @@ The bearer (`AUTH_TOKEN`) comes from `run.sh` (fetches it from your secret store
 multiple agents deploys one unit per agent (distinct `AGENT_NAME`/`WORKDIR`). Domain-specific
 deploy steps, secret paths, and host wiring live in that domain's own ops repo, not here.
 
-The peer-facing daemon should run SANDBOXED (unprivileged user, no state-changing tools, no
-secrets reachable) — SPEC §6.2; the human control channel stays a separate, fuller daemon.
+**Default deploy = two daemons:** the peer-facing daemon runs SANDBOXED (unprivileged user,
+no state-changing tools, no secrets reachable — `agent-peer-endpoint.service`, SPEC §6.2) and
+the human/ops control channels stay on the separate full-context `agent-endpoint.service`. A
+single privileged daemon that also serves peers is the fallback for hosts that can't split
+yet — use it only where the daemon's user can't reach real secrets, and plan the split.
 
 ## Config (env — set in the unit)
 | Var | Default | Meaning |

@@ -35,12 +35,15 @@ MAILBOX_CA = os.environ.get("MAILBOX_CA", "").strip()
 POLL_PATH = os.environ.get("POLL_PATH", "/outbox").strip()
 
 # E2E body encryption (KN1) — opt-in: set MY_PRIVKEY + PEER_PUBKEY to decrypt inbound asks and
-# encrypt outbound replies, so the relay only ever carries ciphertext. ENC_REQUIRE=1 refuses a
-# plaintext inbound on an encrypted edge. No keys set -> plaintext passthrough (unchanged).
+# encrypt outbound replies, so the relay only ever carries ciphertext. No keys set -> plaintext
+# passthrough (unchanged). KO-M1 (2026-07-23): on an ENCRYPTED edge (keys present) an unsealed
+# inbound is now ALWAYS refused — fail-closed against a relay downgrading/substituting a
+# plaintext body. ENC_REQUIRE is retained for back-compat but is implied on every encrypted
+# edge; edges without keys are unaffected.
 MY_PRIVKEY = os.environ.get("MY_PRIVKEY", "").strip()
 PEER_PUBKEY = os.environ.get("PEER_PUBKEY", "").strip()
 ENC = bool(MY_PRIVKEY and PEER_PUBKEY)
-ENC_REQUIRE = os.environ.get("ENC_REQUIRE", "").strip() in ("1", "true", "yes")
+ENC_REQUIRE = os.environ.get("ENC_REQUIRE", "").strip() in ("1", "true", "yes")  # implied on enc edges
 if ENC:
     import crypto
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://koine-gateway:8095").rstrip("/")
@@ -80,6 +83,21 @@ CTX = ssl.create_default_context(cafile=MAILBOX_CA) if MAILBOX_CA \
     else ssl.create_default_context()
 
 
+def _sealed(env):
+    """Structural sealed-check (mirrors crypto.is_sealed; no `cryptography` import needed)."""
+    return isinstance(env, dict) and isinstance(env.get("enc"), dict)
+
+
+def _inbound_seal_error(env, enc_edge):
+    """KO-M1 (fail-closed on downgrade): on an E2E edge (this side holds keys for the peer),
+    an inbound envelope MUST arrive sealed — otherwise a neutral/malicious relay could
+    substitute a plaintext body and have it processed. Returns refusal text, or None."""
+    if enc_edge and not _sealed(env):
+        return ("unencrypted message refused on an encrypted edge "
+                "(E2E sealing required; possible downgrade by the transport)")
+    return None
+
+
 def _req(url, body=None, bearer="", ctx=None, timeout=35):
     req = urllib.request.Request(
         url, data=json.dumps(body).encode() if body is not None else None,
@@ -108,14 +126,15 @@ def handle(env):
         enc_edge = ENC
 
     reply = None
-    if enc_edge:
-        if ENC_REQUIRE and not crypto.is_sealed(env):
-            reply = {"ok": False, "body": "unencrypted message refused on an encrypted edge"}
-        else:
-            try:                      # a valid decrypt with the sender's pubkey AUTHENTICATES `from`
-                env = crypto.open_body(env, MY_PRIVKEY, peer_pub)
-            except Exception as e:
-                reply = {"ok": False, "body": f"decrypt/auth failed: {e}"}
+    seal_err = _inbound_seal_error(env, enc_edge)
+    if seal_err:                      # KO-M1: never process a plaintext body on an E2E edge
+        reply = {"ok": False, "body": seal_err}
+        print(f"REFUSED unsealed inbound on E2E edge from={sender} id={env.get('id')}", flush=True)
+    elif enc_edge:
+        try:                          # a valid decrypt with the sender's pubkey AUTHENTICATES `from`
+            env = crypto.open_body(env, MY_PRIVKEY, peer_pub)
+        except Exception as e:
+            reply = {"ok": False, "body": f"decrypt/auth failed: {e}"}
     if reply is None:
         if str(env.get("to", "")).strip() != LOCAL_AGENT:
             reply = {"ok": False, "body": f"refused: not addressed to {LOCAL_AGENT}"}

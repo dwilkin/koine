@@ -19,19 +19,37 @@ import re
 REDACTION = "[REDACTED-SECRET]"
 
 # Value-shaped secret patterns (whole match -> placeholder), most-specific first.
+# Broadened 2026-07-23 (KO-H1 tighten): whole PEM blocks, ecosystem-prefixed tokens
+# (koine kagt_/katt_/knod_/knat_, rag ragt_, caldera cdep_, ...), `Bearer <value>` headers,
+# vault batch/recovery tokens, and very long hex blobs. Thresholds stay conservative:
+# 40-hex git SHAs and 64-hex sha256 checksums (legit in peer answers, e.g. share-skill
+# manifests) must NOT trip.
 _SECRET_PATTERNS = [
-    ("private_key_block", re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")),
+    # whole PEM private-key block when the END marker is present; header line alone otherwise
+    ("private_key_block", re.compile(
+        r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"
+        r"(?:[\s\S]{0,20000}?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----)?")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     ("aws_akia", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("slack", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}")),
     ("github", re.compile(r"\bgh[opsu]_[A-Za-z0-9]{30,}")),
     ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}")),
     ("generic_sk", re.compile(r"\bsk-[A-Za-z0-9]{24,}")),
-    ("vault_token", re.compile(r"\b(?:hvs\.[A-Za-z0-9._-]{20,}|s\.[A-Za-z0-9]{24,})\b")),
+    # ecosystem-prefixed tokens (koine agent/attach/node/network, rag, caldera deploy, stripe)
+    ("prefixed_token", re.compile(
+        r"\b(?:kagt|katt|knod|knat|ragt|cdep|rk_live|sk_live)_[A-Za-z0-9_-]{12,}")),
+    # HTTP Authorization header style: `Bearer <token>` — the value must be >=16 chars and
+    # contain an uppercase/digit so prose like "Bearer authentication" never trips
+    ("bearer_header", re.compile(
+        r"\bBearer\s+(?=[A-Za-z0-9._+/=-]*[A-Z0-9])[A-Za-z0-9._+/=-]{16,}")),
+    ("vault_token", re.compile(r"\b(?:hv[sbr]\.[A-Za-z0-9._-]{20,}|s\.[A-Za-z0-9]{24,})\b")),
     # long mixed-case/base64 run (needs lower+upper+digit so plain hex SHAs/commit ids don't trip it)
     ("high_entropy", re.compile(
         r"(?=[A-Za-z0-9+/]{40,}={0,2})(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[A-Z])"
         r"(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{40,}={0,2}")),
+    # very long hex blob (raw key material, hex-encoded private keys); threshold 96 means
+    # 40-hex commit ids and 64-hex sha256 digests (legit in peer answers) never trip
+    ("long_hex", re.compile(r"\b[0-9a-fA-F]{96,}\b")),
 ]
 
 # key=value / key: value assignments — keep the key name, redact the value.
@@ -39,10 +57,16 @@ _ASSIGN = re.compile(
     r"(?i)((?:api[_-]?key|secret|client[_-]?secret|access[_-]?key|token|password|passwd|pwd|"
     r"bearer)\s*[:=]\s*)[\"']?([^\s\"']{6,})")
 
-# Inbound secret-SEEKING terms (tripwire). Detects intent, not values.
+# Inbound secret-SEEKING terms (tripwire). Detects intent, not values. Broadened 2026-07-23
+# (KO-H1): unseal keys, credential files (.aws/credentials, .netrc, .pgpass), process-env
+# probing, and oauth/refresh/auth/master token-key phrasing. Alert-only backstop — kept
+# conservative so ordinary infra Q&A doesn't page the human.
 _INBOUND_SEEK = re.compile(
     r"(?i)(\.env\b|id_[er]sa|id_ed25519|private[\s_-]?key|vault[\s_-]?token|\.vault-token|"
     r"~/\.ssh|\bapi[_-]?key\b|\bclient[_-]?secret\b|\bsecret[_-]?key\b|\bbearer[_-]?token\b|"
+    r"\bunseal[\s_-]?key|\.aws/credentials|\.netrc\b|\.pgpass\b|/proc/self/environ|"
+    r"\bprintenv\b|\boauth[_-]?token\b|\brefresh[_-]?token\b|\bauth[_-]?token\b|"
+    r"\bmaster[\s_-]?key\b|\bsigning[\s_-]?key\b|"
     r"\bpassword\b|\bcredential)")
 
 

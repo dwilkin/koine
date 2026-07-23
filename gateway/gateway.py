@@ -34,7 +34,9 @@ Config via environment (compose + the domain's deploy script from its secret sto
   AGENTS_JSON          path to the agent-card directory       (default /app/agents.json)
   ENDPOINT_TOKEN       bearer for the peers' /ask endpoints   (required)
   MY_PRIVKEY           this domain's X25519 private key; enables E2E body encryption on
-                       edges whose card carries a `pubkey`    (optional)
+                       edges whose card carries a `pubkey`    (optional). On such an edge
+                       an UNSEALED reply body is refused (fail-closed, KO-M1) — a relay
+                       cannot downgrade an E2E edge to plaintext.
   MAX_THREAD_DEPTH     messages allowed per thread_id         (default 6)
   MAX_MSGS_PER_HOUR    per-initiator cap                      (default 60)
   COOLDOWN_SECONDS     min gap between one agent's messages   (default 0)
@@ -486,6 +488,24 @@ def _bridge_note(agent, text):
 
 # ---- routing ---------------------------------------------------------------
 
+def _reply_seal_check(data):
+    """KO-M1 (fail-closed on downgrade, 2026-07-23): called only for an E2E edge (the peer's
+    card carries a `pubkey`, so every reply body is supposed to arrive sealed). A reply that
+    is NOT sealed but still carries a body is refused — a neutral/malicious relay must not be
+    able to substitute a plaintext body on an encrypted edge and have it processed as the
+    peer's answer. Structural sealed-check (mirrors crypto.is_sealed) so this is enforceable
+    and testable without the `cryptography` dependency. Returns an error string, or None if
+    the reply may proceed (sealed, or carries no body to substitute)."""
+    if not isinstance(data, dict):
+        return "malformed reply (not an object) on an E2E edge"
+    if isinstance(data.get("enc"), dict):
+        return None  # sealed — decrypt/verify happens in _route via crypto.open_body
+    if not str(data.get("body", "")).strip():
+        return None  # bare status/ack with no body — nothing a relay could have substituted
+    return ("unsealed reply refused on an E2E edge (peer card has a pubkey but the reply "
+            "body arrived plaintext — possible downgrade/substitution by the transport)")
+
+
 def _route(target, msg):
     """Forward the message to the target agent's /ask endpoint; return (ok, reply, meta)."""
     card = AGENTS.get(target)
@@ -516,11 +536,16 @@ def _route(target, msg):
     try:
         with urllib.request.urlopen(req, timeout=ROUTE_TIMEOUT, context=ctx) as r:
             data = json.loads(r.read())
-        if enc and _crypto.is_sealed(data):
-            try:
-                data = _crypto.open_body(data, MY_PRIVKEY, peer_pub)
-            except Exception as e:
-                return False, f"reply decrypt failed: {e}", {"routed": True}
+        if enc:
+            seal_err = _reply_seal_check(data)
+            if seal_err:
+                # audited by the caller's reply row (meta.enc_refused marks the reason)
+                return False, seal_err, {"routed": True, "enc_refused": True}
+            if _crypto.is_sealed(data):
+                try:
+                    data = _crypto.open_body(data, MY_PRIVKEY, peer_pub)
+                except Exception as e:
+                    return False, f"reply decrypt failed: {e}", {"routed": True}
         return bool(data.get("ok", True)), data.get("body", ""), {
             "routed": True, "elapsed": round(time.time() - t0, 2),
             "peer_meta": data.get("meta"),

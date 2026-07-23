@@ -20,6 +20,12 @@ secrets never live in ~/.claude.json):
   GW_BEARER_TOKEN   fallback bearer if KC auth is unavailable           (optional)
   A2A_TIMEOUT       seconds to await the peer's answer (default 210)
   KOINE_PEERS       the peer directory this agent may reach (see below) (optional)
+  KOINE_CA_FILE     CA bundle to VERIFY the HTTPS legs against (KO-L3): when set, the
+                    Keycloak token fetch (and any https gateway URL) is verified with
+                    CERT_REQUIRED + hostname check against this bundle (point it at your
+                    private/lab CA). The gateway.py names OIDC_CA_FILE / LAB_CA_FILE are
+                    accepted as aliases. Unset = legacy permissive behavior (no
+                    verification) so existing deployments keep working.        (optional)
 At least one of (KC_* trio) or GW_BEARER_TOKEN must be set.
 
 KOINE_PEERS is the ONLY domain-specific data this reference server needs — it is inline
@@ -73,12 +79,31 @@ def _load_peers():
 
 PEERS = _load_peers()
 
-# A private CA typically isn't in the agent host's trust store, and the token endpoint may be
-# hit by IP. The security of this leg rests on the JWT signature (validated at the gateway) +
-# the trusted local network, not this leg's TLS.
-_SSL = ssl.create_default_context()
-_SSL.check_hostname = False
-_SSL.verify_mode = ssl.CERT_NONE
+# TLS for the HTTPS legs (KO-L3, 2026-07-23). When a CA bundle is configured
+# (KOINE_CA_FILE, or gateway.py's names OIDC_CA_FILE / LAB_CA_FILE) the context VERIFIES
+# (CERT_REQUIRED + hostname check) — set it to your private/lab CA so the Keycloak token
+# fetch can no longer be MITM'd for the client secret. Only when NO CA file is configured
+# do we fall back to the legacy permissive context (a private CA typically isn't in the
+# host trust store and the token endpoint may be hit by IP; the JWT signature — validated
+# at the gateway — remains the identity control on that leg).
+KOINE_CA_FILE = (os.environ.get("KOINE_CA_FILE") or os.environ.get("OIDC_CA_FILE")
+                 or os.environ.get("LAB_CA_FILE") or "").strip()
+
+
+def _build_ssl_context(ca_file=None):
+    """Verifying context when a CA bundle is configured; legacy permissive one otherwise.
+    A configured-but-missing path still returns a VERIFYING context (system trust store) —
+    a bad CA path must fail toward verification, never silently downgrade to CERT_NONE."""
+    ca = KOINE_CA_FILE if ca_file is None else str(ca_file or "").strip()
+    if ca:
+        return ssl.create_default_context(cafile=ca if os.path.exists(ca) else None)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+_SSL = _build_ssl_context()
 
 _tok_cache = {"token": None, "exp": 0.0}
 
