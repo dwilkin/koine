@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 
 _ctx = tempfile.mkdtemp(prefix="skillctx-")
-# a minimal published bundle (what the cc-01 builder writes)
+# a minimal published bundle (what the host-side builder writes)
 _bundle = io.BytesIO()
 _man = json.dumps({"kind": "skill-bundle", "scrubbed": True,
                    "skills": [{"name": "demo", "version": "2026.01.01"}]}).encode()

@@ -153,7 +153,7 @@ CALDERA_CTX = pathlib.Path(os.environ.get(
 # kinds that create/cancel state — never machine-acked, never machine-answered
 CALDERA_STATE_KINDS = {"reserve_propose", "reserve_cancel", "model_request"}
 # koine/skill/v1 machine lane: a peer discovers + FETCHES a CATALOGED, pre-scrubbed skill
-# bundle, served verbatim from SKILLS_CTX (published by the cc-01-side builder). The catalog
+# bundle, served verbatim from SKILLS_CTX (published by the domain host-side builder). The catalog
 # IS the operator's pre-approval of what's shareable, so serving is deterministic + LLM-free
 # ($0). No published skills dir → no-ops naturally (falls through to the LLM to explain).
 SKILLS_CTX = pathlib.Path(os.environ.get(
@@ -330,7 +330,7 @@ def _build_prompt(msg):
 def _skill_answer(body, msg):
     """koine/skill/v1 machine lane (peer path, read-only, LLM-free). `catalog` lists the
     cataloged shareable skills; `fetch` returns a pre-scrubbed bundle (base64) for a named
-    skill. Served verbatim from SKILLS_CTX/index.json + <file>.tgz — the cc-01-side builder
+    skill. Served verbatim from SKILLS_CTX/index.json + <file>.tgz — the host-side builder
     is the only writer, and it packages ONLY catalog skills, scrubbed. Returns None (fall
     through to the LLM) if nothing is published, so a host without the feature no-ops."""
     meta = {"machine_lane": True, "cost_usd": 0.0, "elapsed": 0.0}
