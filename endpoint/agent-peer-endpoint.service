@@ -5,7 +5,7 @@
 # credential.
 #
 # Requires (root, one-time bootstrap):
-#   - user `atlas-peer` (agent-host) / `genie-peer` (peer-host): system user, no login shell, not in
+#   - per-agent system user (e.g. `atlas-peer`): no login shell, no login shell, not in
 #     docker/sudo, own home under /var/lib/agent-peer.
 #   - /etc/agent-peer/peer.env  (root:atlas-peer 0640): AUTH_TOKEN=<peer inbound bearer> and
 #     ANTHROPIC_API_KEY=<dedicated key — NOT the account subscription; the peer user can't read
