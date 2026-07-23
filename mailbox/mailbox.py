@@ -119,6 +119,12 @@ GRANT_THREAD_DEPTH = int(os.environ.get("GRANT_THREAD_DEPTH", "6"))
 GRANT_EXPIRES = os.environ.get("GRANT_EXPIRES", "").strip()   # "YYYY-MM-DD"
 SEEN_TTL = int(os.environ.get("SEEN_TTL", "900"))
 SERVICE_NAME = "koine-mailbox"
+# KN-M2 Phase 2: node→node mail forwarding for cross-group edges. A recipient homed on a
+# DIFFERENT node group appears in the registry's `forwarding` table (agent → group + node
+# URLs); this box forwards such mail to a target-group node's /node-forward. The mesh secret
+# authenticates node→node calls both ways. Unset (single-group deployments — everyone today)
+# = forwarding disabled: every recipient is local and behavior is unchanged.
+NODE_FORWARD_TOKEN = os.environ.get("NODE_FORWARD_TOKEN", "").strip()
 
 # ── multi-tenant registry (KN2) ──────────────────────────────────────────────────────────────
 # relay mode serves MANY accounts and edges from one box. Config source (relay mode only):
@@ -135,6 +141,7 @@ RELAY_REGISTRY = os.environ.get("RELAY_REGISTRY", "").strip()
 _TOKEN_TO_AGENT = {}          # sha256(token) -> agent name
 _AGENTS = set()               # all registered account names
 _EDGES = {}                   # frozenset({a,b}) -> {"types":set,"max_per_day","thread_depth","expires"}
+_FORWARDING = {}              # KN-M2 P2: foreign agent -> {"group","urls":[node base url,…]}
 _registry_lock = threading.Lock()
 
 
@@ -151,8 +158,8 @@ def _load_registry():
     Rebuilds into fresh dicts and swaps them atomically, so it is safe to call live (SIGHUP) while
     requests are in flight — the koine.network control plane rewrites registry.json + signals to
     add an account or edge without a restart."""
-    global _TOKEN_TO_AGENT, _AGENTS, _EDGES
-    t2a, agents, edges = {}, set(), {}
+    global _TOKEN_TO_AGENT, _AGENTS, _EDGES, _FORWARDING
+    t2a, agents, edges, forwarding = {}, set(), {}, {}
 
     def reg_account(agent, token="", token_sha256=""):
         agents.add(agent)
@@ -171,13 +178,19 @@ def _load_registry():
             a, b = e["agents"]
             reg_edge(a, b, e.get("types", ["question", "notification"]),
                      e.get("max_per_day", 20), e.get("thread_depth", 6), e.get("expires", ""))
+        # KN-M2 P2: foreign recipients this box forwards mail to (cross-group edges).
+        for f in data.get("forwarding", []):
+            ag = f.get("agent")
+            if ag:
+                forwarding[ag] = {"group": f.get("group", ""),
+                                  "urls": [u for u in f.get("urls", []) if u]}
     elif MODE == "relay":                 # single-edge, synthesized from env (backward compat)
         reg_account(AGENT_A, TOKEN_A)
         reg_account(AGENT_B, TOKEN_B)
         reg_edge(AGENT_A, AGENT_B, GRANT_TYPES, GRANT_MAX_PER_DAY,
                  GRANT_THREAD_DEPTH, GRANT_EXPIRES)
     with _registry_lock:                  # atomic swap
-        _TOKEN_TO_AGENT, _AGENTS, _EDGES = t2a, agents, edges
+        _TOKEN_TO_AGENT, _AGENTS, _EDGES, _FORWARDING = t2a, agents, edges, forwarding
 
 
 def _edge_grant(a: str, b: str):
@@ -278,6 +291,84 @@ def _days_to_expiry():
         except ValueError:
             pass
     return min(days) if days else None
+
+
+def _deliver_local(frm, to, msg, mtype):
+    """Queue an envelope into a LOCAL recipient's inbox; for a question, block for its reply.
+    Returns (status_code, body_dict). Shared by /ask (local recipient) and /node-forward
+    (a cross-group message that arrived here for a locally-homed recipient). The caller holds
+    the in-flight semaphore for questions."""
+    box = INBOXES.setdefault(to, deque())
+    ev_new = INBOX_EVENTS.setdefault(to, threading.Event())
+    with _lock:
+        if len(box) >= MAX_QUEUE:
+            return 429, {"ok": False, "body": "recipient inbox full"}
+        box.append(msg)
+        REPLY_OWNER[msg["id"]] = to
+        ev = EVENTS[msg["id"]] = threading.Event() if mtype != "notification" else None
+    ev_new.set()
+    _audit_write("relay_queued", frm=frm, to=to, id=msg["id"], type=mtype)
+    if mtype == "notification":
+        return 202, {"ok": True, "body": "queued", "id": msg["id"],
+                     "thread_id": msg["thread_id"]}
+    ok = ev.wait(REPLY_TIMEOUT)
+    with _lock:
+        EVENTS.pop(msg["id"], None)
+        REPLY_OWNER.pop(msg["id"], None)
+        reply = RESULTS.pop(msg["id"], None)
+    if not ok or reply is None:
+        return 504, {"ok": False,
+                     "body": f"no reply from '{to}' within {REPLY_TIMEOUT}s "
+                             "(recipient poller down or slow?)"}
+    _lf.log_exchange(
+        trace_id=msg.get("thread_id") or msg["id"],
+        name=f"{frm}->{to}:{mtype}", sender=frm, target=to, mtype=mtype,
+        body=msg.get("body", ""), reply=str(reply.get("body", "")),
+        ok=bool(reply.get("ok")), domain=DOMAIN)
+    return (200 if reply.get("ok") else 502), reply
+
+
+def _forward_to_group(frm, to, msg, mtype):
+    """KN-M2 P2: `to` is homed on another node group — forward the envelope to one of that
+    group's nodes (/node-forward, mesh-secret auth) and relay the reply. Returns
+    (status_code, body_dict)."""
+    route = _FORWARDING.get(to) or {}
+    urls = route.get("urls") or []
+    if not (NODE_FORWARD_TOKEN and urls):
+        return 502, {"ok": False,
+                     "body": f"recipient '{to}' is on node group '{route.get('group', '?')}' "
+                             "but no forward route is configured here"}
+    payload = json.dumps({
+        "from": frm, "to": to, "type": mtype, "body": msg.get("body"),
+        "id": msg["id"], "thread_id": msg["thread_id"], "ts": msg["ts"],
+    }).encode()
+    ctx = ssl.create_default_context()
+    if os.environ.get("NODE_FORWARD_INSECURE") == "1":   # self-signed mesh (opt-in)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    last = "no route"
+    for base in urls:
+        try:
+            req = urllib.request.Request(
+                base.rstrip("/") + "/node-forward", data=payload, method="POST",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {NODE_FORWARD_TOKEN}"})
+            opener = urllib.request.urlopen(
+                req, timeout=REPLY_TIMEOUT,
+                context=ctx if base.startswith("https") else None)
+            with opener as r:
+                _audit_write("relay_forwarded", frm=frm, to=to, id=msg["id"],
+                             type=mtype, group=route.get("group"))
+                return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.load(e)
+            except Exception:
+                last = f"HTTP {e.code}"
+        except Exception as e:      # noqa: BLE001 — try the next node URL
+            last = str(e)
+    _audit_write("relay_forward_failed", frm=frm, to=to, id=msg["id"], reason=last)
+    return 502, {"ok": False, "body": f"forward to group '{route.get('group', '?')}' failed: {last}"}
 
 
 class BaseH(BaseHTTPRequestHandler):
@@ -474,6 +565,45 @@ class RelayHandler(BaseH):
     def do_POST(self):
         if KILL.exists():
             return self._send(503, {"error": "mailbox disabled (kill switch)"})
+        # KN-M2 P2: node→node mail forwarding ingress. Authenticated by the MESH SECRET
+        # (not an agent token); `from` is trusted from the body (the sending node already
+        # token-authed the origin agent) but the edge grant is RE-ENFORCED here as
+        # defense-in-depth. Recipient must be homed on THIS node.
+        if self.path == "/node-forward":
+            if not (NODE_FORWARD_TOKEN and self._authed(NODE_FORWARD_TOKEN)):
+                return self._send(401, {"error": "unauthorized"})
+            msg = self._body()
+            if msg is None:
+                return self._send(400, {"error": "bad body"})
+            frm = str(msg.get("from", "")).strip()
+            to = str(msg.get("to", "")).strip()
+            if to not in _AGENTS:
+                return self._send(400, {"ok": False,
+                                        "body": f"'{to}' is not homed on this node"})
+            grant = _edge_grant(frm, to)
+            if grant is None:
+                _audit_write("node_forward_refused", frm=frm, to=to, code=403,
+                             reason="no edge")
+                return self._send(403, {"ok": False,
+                                        "body": f"no registered edge {frm}<->{to}"})
+            gate = _grant_gate(msg, grant, sender=frm, edge=_edge_key(frm, to))
+            if gate:
+                code, reason = gate
+                _audit_write("node_forward_refused", frm=frm, to=to, id=msg.get("id"),
+                             type=msg.get("type"), code=code, reason=reason)
+                return self._send(code, {"ok": False, "body": reason})
+            msg.setdefault("id", os.urandom(6).hex())
+            msg.setdefault("thread_id", msg["id"])
+            msg.setdefault("ts", _now())
+            mtype = str(msg.get("type", "question"))
+            if mtype != "notification" and not _relay_sem.acquire(blocking=False):
+                return self._send(429, {"ok": False, "body": "relay busy (max in-flight)"})
+            try:
+                code, body = _deliver_local(frm, to, msg, mtype)
+                return self._send(code, body)
+            finally:
+                if mtype != "notification":
+                    _relay_sem.release()
         me = self._whoami()
         if me is None:
             return self._send(401, {"error": "unauthorized"})
@@ -495,9 +625,12 @@ class RelayHandler(BaseH):
             return self._send(200, {"ok": True})
         if self.path == "/ask":
             to = str(msg.get("to", "")).strip()
-            if to not in _AGENTS:
+            # KN-M2 P2: recipient is local (its inbox is here) OR foreign-but-forwardable
+            # (a cross-group edge whose peer is homed on another node group).
+            is_local = to in _AGENTS
+            if not is_local and to not in _FORWARDING:
                 return self._send(400, {"ok": False, "body": f"unknown recipient '{to}'"})
-            grant = _edge_grant(me, to)
+            grant = _edge_grant(me, to)       # cross-group edges appear in both groups' registries
             if grant is None:
                 _audit_write("ask_refused", frm=me, to=to, code=403, reason="no edge")
                 return self._send(403, {"ok": False,
@@ -524,36 +657,11 @@ class RelayHandler(BaseH):
                                         "body": f"relay busy (max {RELAY_MAX_INFLIGHT} concurrent "
                                                 "questions) — retry shortly"})
             try:
-                box = INBOXES.setdefault(to, deque())
-                ev_new = INBOX_EVENTS.setdefault(to, threading.Event())
-                with _lock:
-                    if len(box) >= MAX_QUEUE:
-                        return self._send(429, {"ok": False, "body": "recipient inbox full"})
-                    box.append(msg)
-                    REPLY_OWNER[msg["id"]] = to
-                    if mtype != "notification":
-                        ev = EVENTS[msg["id"]] = threading.Event()
-                ev_new.set()
-                _audit_write("relay_queued", frm=me, to=to, id=msg["id"], type=mtype)
-                if mtype == "notification":
-                    # fire-and-forget: delivery ack is pipeline-level (SPEC §4) — don't hold the line
-                    return self._send(202, {"ok": True, "body": "queued",
-                                            "id": msg["id"], "thread_id": msg["thread_id"]})
-                ok = ev.wait(REPLY_TIMEOUT)
-                with _lock:
-                    EVENTS.pop(msg["id"], None)
-                    REPLY_OWNER.pop(msg["id"], None)
-                    reply = RESULTS.pop(msg["id"], None)
-                if not ok or reply is None:
-                    return self._send(504, {"ok": False,
-                                            "body": f"no reply from '{to}' within {REPLY_TIMEOUT}s "
-                                                    "(recipient poller down or slow?)"})
-                _lf.log_exchange(
-                    trace_id=msg.get("thread_id") or msg["id"],
-                    name=f"{me}->{to}:{mtype}", sender=me, target=to, mtype=mtype,
-                    body=msg.get("body", ""), reply=str(reply.get("body", "")),
-                    ok=bool(reply.get("ok")), domain=DOMAIN)
-                return self._send(200 if reply.get("ok") else 502, reply)
+                if is_local:
+                    code, body = _deliver_local(me, to, msg, mtype)
+                else:
+                    code, body = _forward_to_group(me, to, msg, mtype)
+                return self._send(code, body)
             finally:
                 if mtype != "notification":
                     _relay_sem.release()
