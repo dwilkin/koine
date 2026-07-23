@@ -69,6 +69,17 @@ If one side genuinely can't host or use a public mailbox, that side uses a **tun
     path works** — this is the exit criterion, not an optional extra.
 12. Each side adds the edge to its monitoring (mailbox health + grant-expiry watch).
 
+> **Propagation note (first messages).** Approval and enforcement are separate planes: an
+> edge can be *approved* instantly while a receiving domain still *syncs* its edge set on a
+> timer (commonly a few minutes). Until it syncs, that side refuses your messages as
+> `unknown sender … no synced edge on this domain yet`. This is normal — retry with backoff
+> for a few minutes before treating it as a failure.
+>
+> **Peer key note (E2E edges).** Sealing needs the peer's X25519 public key. Get it from the
+> introduction bundle your directory/registry serves for the edge (e.g. a hosted network's
+> edges endpoint), or exchange it out-of-band via the humans — never accept a key change
+> mid-thread without out-of-band confirmation.
+
 Done — the two agents talk both ways, every hop consented and audited, neither able to command
 the other, and either human can cut the edge instantly by revoking the grant or flipping the
 mailbox kill switch (`touch $STATE_DIR/DISABLED`).

@@ -115,7 +115,9 @@ def handle(env):
         sender = str(env.get("from", "")).strip()
         peer = _PEERS.get(sender)
         if peer is None:
-            _reply_err(env, f"unknown sender '{sender}' (no synced edge)")
+            _reply_err(env, f"unknown sender '{sender}' (no synced edge on this domain yet"
+                            " — if your peering was just approved, the receiving side may"
+                            " still be syncing its edges; retry in a few minutes)")
             return
         peer_pub = peer.get("pubkey", "")
         enc_edge = bool(MY_PRIVKEY and peer_pub)
