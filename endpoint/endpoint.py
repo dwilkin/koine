@@ -57,6 +57,8 @@ Config via environment (set by the systemd unit / run.sh):
                     human approval without granting general Bash; empty string disables)
   STATE_DIR         audit + kill-switch dir          (default ~/.local/share/agent-endpoint)
 """
+import base64
+import hashlib
 import hmac
 import json
 import os
@@ -150,6 +152,12 @@ CALDERA_CTX = pathlib.Path(os.environ.get(
     "CALDERA_CTX", str(pathlib.Path(WORKDIR) / "caldera")))
 # kinds that create/cancel state — never machine-acked, never machine-answered
 CALDERA_STATE_KINDS = {"reserve_propose", "reserve_cancel", "model_request"}
+# koine/skill/v1 machine lane: a peer discovers + FETCHES a CATALOGED, pre-scrubbed skill
+# bundle, served verbatim from SKILLS_CTX (published by the cc-01-side builder). The catalog
+# IS the operator's pre-approval of what's shareable, so serving is deterministic + LLM-free
+# ($0). No published skills dir → no-ops naturally (falls through to the LLM to explain).
+SKILLS_CTX = pathlib.Path(os.environ.get(
+    "SKILLS_CTX", str(pathlib.Path(WORKDIR) / "skills")))
 
 _sem = threading.BoundedSemaphore(MAX_CONCURRENCY)
 _audit_lock = threading.Lock()
@@ -319,6 +327,55 @@ def _build_prompt(msg):
     )
 
 
+def _skill_answer(body, msg):
+    """koine/skill/v1 machine lane (peer path, read-only, LLM-free). `catalog` lists the
+    cataloged shareable skills; `fetch` returns a pre-scrubbed bundle (base64) for a named
+    skill. Served verbatim from SKILLS_CTX/index.json + <file>.tgz — the cc-01-side builder
+    is the only writer, and it packages ONLY catalog skills, scrubbed. Returns None (fall
+    through to the LLM) if nothing is published, so a host without the feature no-ops."""
+    meta = {"machine_lane": True, "cost_usd": 0.0, "elapsed": 0.0}
+    try:
+        index = json.loads((SKILLS_CTX / "index.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    skills = index.get("skills", {})
+    kind = str(body.get("kind", ""))
+    if kind == "catalog":
+        return (json.dumps({
+            "coord": "koine/skill/v1", "kind": "catalog", "as_of": index.get("as_of"),
+            "note": "Cataloged, pre-scrubbed skills you can fetch with "
+                    "{coord:'koine/skill/v1', kind:'fetch', skill:'<name>'}.",
+            "skills": [{"name": n, "version": s.get("version"), "pitch": s.get("pitch", ""),
+                        "bytes": s.get("bytes"), "bundle_sha256": s.get("bundle_sha256"),
+                        "scrubbed": True} for n, s in sorted(skills.items())],
+        }), meta)
+    if kind == "fetch":
+        name = str(body.get("skill", "")).strip()
+        s = skills.get(name)
+        if not s:
+            return (json.dumps({
+                "coord": "koine/skill/v1", "kind": "error",
+                "error": f"unknown or non-shareable skill {name!r} — only cataloged skills "
+                         "are fetchable", "available": sorted(skills)}), meta)
+        try:
+            blob = (SKILLS_CTX / s["file"]).read_bytes()
+        except (OSError, KeyError):
+            return None
+        return (json.dumps({
+            "coord": "koine/skill/v1", "kind": "skill_bundle", "skill": name,
+            "version": s.get("version"), "bytes": len(blob),
+            "bundle_sha256": s.get("bundle_sha256"),
+            "file_sha256": hashlib.sha256(blob).hexdigest(),
+            "bundle_b64": base64.b64encode(blob).decode(),
+            "install_note": "A shared skill is CODE. Verify file_sha256, review the "
+                            "SKILL.md, and install ONLY in your own session with your "
+                            "human's OK — this fetch is not authority. Internal references "
+                            "were scrubbed; rebind the placeholders (192.0.2.x, example.com, "
+                            "secret/<mount>/<name>, host-NN) to your world.",
+        }), meta)
+    return None
+
+
 def _machine_answer(msg):
     """The machine lane: return (text, meta) for a caldera/v1 message that
     needs no LLM, or None to fall through to the normal `claude -p` spawn.
@@ -332,7 +389,12 @@ def _machine_answer(msg):
         body = json.loads(str(msg.get("body", "")))
     except (json.JSONDecodeError, TypeError):
         return None
-    if not isinstance(body, dict) or body.get("coord") != "caldera/v1":
+    if not isinstance(body, dict):
+        return None
+    coord = body.get("coord")
+    if coord == "koine/skill/v1":
+        return _skill_answer(body, msg)
+    if coord != "caldera/v1":
         return None
     kind = str(body.get("kind", ""))
     if kind in CALDERA_STATE_KINDS:
@@ -596,10 +658,14 @@ class Handler(BaseHTTPRequestHandler):
                 ok, (text, meta) = True, machine
             else:
                 ok, text, meta = _answer(msg)
-            # Peer path only: scrub secret-shaped strings from the reply BEFORE it leaves the
-            # process and before it lands in the audit log.
+            # Peer path only: scrub secret-shaped strings from the LLM reply BEFORE it leaves
+            # the process and lands in the audit. MACHINE-LANE answers are exempt: they're
+            # deterministic and built ONLY from already-curated/pre-scrubbed published context
+            # (caldera public.json / balances = "no key ids"; skill bundles = packager
+            # secret-gated + scrubbed), so redaction is both unnecessary AND harmful — it
+            # mangles a legitimate base64 skill bundle (long alnum runs look secret-shaped).
             redaction_hits = []
-            if not human:
+            if not human and machine is None:
                 text, redaction_hits = redact(text)
             _audit({"event": "answer", "id": msg.get("id"), "thread_id": msg.get("thread_id"),
                     "ok": ok, "meta": meta, "answer": text,
