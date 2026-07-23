@@ -103,6 +103,10 @@ KEY_FILE = os.environ.get("KEY_FILE", "/etc/koine-mailbox/mailbox-key.pem")
 STATE_DIR = pathlib.Path(os.environ.get("STATE_DIR", "/var/lib/koine-mailbox"))
 ENDPOINT_URL = os.environ.get("ENDPOINT_URL", "http://127.0.0.1:8090").rstrip("/")
 REPLY_TIMEOUT = int(os.environ.get("REPLY_TIMEOUT", "210"))
+# KO-L2: bound concurrent BLOCKING questions so a burst can't exhaust server threads/memory
+# (each holds a worker up to REPLY_TIMEOUT). Notifications are 202 fire-and-forget, uncapped.
+RELAY_MAX_INFLIGHT = int(os.environ.get("RELAY_MAX_INFLIGHT", "64"))
+_relay_sem = threading.BoundedSemaphore(RELAY_MAX_INFLIGHT)
 DOMAIN = os.environ.get("DOMAIN", "").strip()
 PUBLIC_PORT = int(os.environ.get("PUBLIC_PORT", "8443"))
 LOCAL_PORT = int(os.environ.get("LOCAL_PORT", "8091"))
@@ -510,36 +514,49 @@ class RelayHandler(BaseH):
             msg.setdefault("thread_id", msg["id"])
             msg.setdefault("ts", _now())
             mtype = str(msg.get("type", "question"))
-            box = INBOXES.setdefault(to, deque())
-            ev_new = INBOX_EVENTS.setdefault(to, threading.Event())
-            with _lock:
-                if len(box) >= MAX_QUEUE:
-                    return self._send(429, {"ok": False, "body": "recipient inbox full"})
-                box.append(msg)
-                REPLY_OWNER[msg["id"]] = to
+            # KO-L2: a blocking question ties up a worker thread up to REPLY_TIMEOUT; cap the
+            # number in flight so a burst can't exhaust threads/memory. Acquire BEFORE enqueue
+            # so we reject early with 429 rather than pile up. Notifications don't block/acquire.
+            if mtype != "notification" and not _relay_sem.acquire(blocking=False):
+                _audit_write("ask_refused", frm=me, to=to, id=msg.get("id"),
+                             type=mtype, code=429, reason="relay busy (max in-flight)")
+                return self._send(429, {"ok": False,
+                                        "body": f"relay busy (max {RELAY_MAX_INFLIGHT} concurrent "
+                                                "questions) — retry shortly"})
+            try:
+                box = INBOXES.setdefault(to, deque())
+                ev_new = INBOX_EVENTS.setdefault(to, threading.Event())
+                with _lock:
+                    if len(box) >= MAX_QUEUE:
+                        return self._send(429, {"ok": False, "body": "recipient inbox full"})
+                    box.append(msg)
+                    REPLY_OWNER[msg["id"]] = to
+                    if mtype != "notification":
+                        ev = EVENTS[msg["id"]] = threading.Event()
+                ev_new.set()
+                _audit_write("relay_queued", frm=me, to=to, id=msg["id"], type=mtype)
+                if mtype == "notification":
+                    # fire-and-forget: delivery ack is pipeline-level (SPEC §4) — don't hold the line
+                    return self._send(202, {"ok": True, "body": "queued",
+                                            "id": msg["id"], "thread_id": msg["thread_id"]})
+                ok = ev.wait(REPLY_TIMEOUT)
+                with _lock:
+                    EVENTS.pop(msg["id"], None)
+                    REPLY_OWNER.pop(msg["id"], None)
+                    reply = RESULTS.pop(msg["id"], None)
+                if not ok or reply is None:
+                    return self._send(504, {"ok": False,
+                                            "body": f"no reply from '{to}' within {REPLY_TIMEOUT}s "
+                                                    "(recipient poller down or slow?)"})
+                _lf.log_exchange(
+                    trace_id=msg.get("thread_id") or msg["id"],
+                    name=f"{me}->{to}:{mtype}", sender=me, target=to, mtype=mtype,
+                    body=msg.get("body", ""), reply=str(reply.get("body", "")),
+                    ok=bool(reply.get("ok")), domain=DOMAIN)
+                return self._send(200 if reply.get("ok") else 502, reply)
+            finally:
                 if mtype != "notification":
-                    ev = EVENTS[msg["id"]] = threading.Event()
-            ev_new.set()
-            _audit_write("relay_queued", frm=me, to=to, id=msg["id"], type=mtype)
-            if mtype == "notification":
-                # fire-and-forget: delivery ack is pipeline-level (SPEC §4) — don't hold the line
-                return self._send(202, {"ok": True, "body": "queued",
-                                        "id": msg["id"], "thread_id": msg["thread_id"]})
-            ok = ev.wait(REPLY_TIMEOUT)
-            with _lock:
-                EVENTS.pop(msg["id"], None)
-                REPLY_OWNER.pop(msg["id"], None)
-                reply = RESULTS.pop(msg["id"], None)
-            if not ok or reply is None:
-                return self._send(504, {"ok": False,
-                                        "body": f"no reply from '{to}' within {REPLY_TIMEOUT}s "
-                                                "(recipient poller down or slow?)"})
-            _lf.log_exchange(
-                trace_id=msg.get("thread_id") or msg["id"],
-                name=f"{me}->{to}:{mtype}", sender=me, target=to, mtype=mtype,
-                body=msg.get("body", ""), reply=str(reply.get("body", "")),
-                ok=bool(reply.get("ok")), domain=DOMAIN)
-            return self._send(200 if reply.get("ok") else 502, reply)
+                    _relay_sem.release()
         return self._send(404, {"error": "not found"})
 
 

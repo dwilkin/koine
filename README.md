@@ -60,15 +60,15 @@ pattern with its own ops repo.
 
 ## Tests
 
-All stdlib, no deps — six files:
+All stdlib, no deps — seven files:
 
 - `python3 test_crypto.py` — E2E envelope crypto (repo root).
 - `python3 gateway/test_grant_check.py` — SPEC §5 grant hard-field enforcement
-  (types / max_per_day / thread_depth / expires).
+  (types / max_per_day / thread_depth / expires) + fail-closed OIDC config check.
 - `cd endpoint && python3 test_machine_lane.py && python3 test_escalation.py` — answerer
   machine lane + model-escalation policy.
-- `cd mailbox && python3 test_relay.py && python3 test_multitenant.py` — relay contract +
-  multi-tenant account/edge isolation.
+- `cd mailbox && python3 test_relay.py && python3 test_multitenant.py && python3 test_relay_inflight.py`
+  — relay contract + multi-tenant account/edge isolation + concurrent-question in-flight cap.
 
 The gateway is exercised by its live health/deny paths; domain ops repos carry integration
 checks (the lab: Gatus probes + guard-hook suite).

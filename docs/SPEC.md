@@ -118,6 +118,10 @@ SHOULD be notified on cap/grant hits.
 - Revocation is instant and unilateral (either human, either operator).
 - Expiry SHOULD be monitored (e.g. `/health` exposing `days_until_grant_expiry`).
 - Intra-domain hops within a thread do not count against `thread_depth`; cross-domain hops do.
+- `thread_depth` is an **anti-loop / runaway control, not an adversary rate limit**: an agent can
+  always start a fresh `thread_id`, so a motivated peer is bounded by `max_per_day`, not by
+  `thread_depth`. Set `max_per_day` as the real cap; use `thread_depth` to stop accidental
+  ping-pong within a single exchange.
 
 ## 6. Answerer contract (normative)
 

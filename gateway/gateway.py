@@ -89,6 +89,23 @@ GW_BEARER_TOKEN = os.environ.get("GW_BEARER_TOKEN", "").strip()
 OIDC_JWKS_URL = os.environ.get("OIDC_JWKS_URL", "").strip()
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").strip()
 OIDC_AUDIENCE = [a for a in os.environ.get("OIDC_AUDIENCE", "").split(",") if a.strip()]
+
+
+def _oidc_config_error(jwks_url, issuer):
+    """Fail-closed config check (SECURITY_FINDINGS KO-M4): enabling JWT validation
+    (OIDC_JWKS_URL set) without a pinned issuer means any token the realm signs is
+    accepted subject only to the azp->agent map. Returns an error string, or None if OK.
+    (Audience-required is deliberately NOT enforced here yet — that's S-B, pending an
+    OIDC_AUDIENCE value being defined; see the findings doc.)"""
+    if jwks_url and not issuer:
+        return ("OIDC_JWKS_URL is set but OIDC_ISSUER is empty — refusing to validate JWTs "
+                "without a pinned issuer. Set OIDC_ISSUER, or unset OIDC_JWKS_URL for bearer-only.")
+    return None
+
+
+_oidc_err = _oidc_config_error(OIDC_JWKS_URL, OIDC_ISSUER)
+if _oidc_err:
+    raise RuntimeError(_oidc_err)
 DOMAIN = os.environ.get("DOMAIN", "").strip()   # observability label for THIS domain
 AGENTS_JSON = os.environ.get("AGENTS_JSON", "/app/agents.json")
 ENDPOINT_TOKEN = os.environ.get("ENDPOINT_TOKEN", "").strip()

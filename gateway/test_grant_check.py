@@ -95,5 +95,19 @@ class GrantCheck(unittest.TestCase):
             gw.AGENTS["peer"]["grant"]["thread_depth"] = 3
 
 
+class OidcConfig(unittest.TestCase):
+    """KO-M4: fail-closed when JWT validation is enabled without a pinned issuer."""
+
+    def test_jwks_without_issuer_is_error(self):
+        self.assertIsNotNone(gw._oidc_config_error("https://idp/jwks", ""))
+
+    def test_jwks_with_issuer_ok(self):
+        self.assertIsNone(gw._oidc_config_error("https://idp/jwks", "https://idp/realms/x"))
+
+    def test_bearer_only_ok(self):
+        # no JWKS configured -> bearer-only mode, issuer not required
+        self.assertIsNone(gw._oidc_config_error("", ""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
