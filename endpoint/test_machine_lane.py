@@ -72,13 +72,18 @@ class MachineLaneTest(unittest.TestCase):
     def test_balance_reads_own_account_file_only(self):
         got = self._body(_msg({"coord": "caldera/v1", "kind": "balance"}))
         self.assertEqual(got, ACCOUNT)
-        # unknown sender -> no file -> falls through to the LLM
-        self.assertIsNone(endpoint._machine_answer(
-            _msg({"coord": "caldera/v1", "kind": "balance"}, sender="mallory")))
-        # path traversal in the sender name is neutralized by sanitization
-        self.assertIsNone(endpoint._machine_answer(
-            _msg({"coord": "caldera/v1", "kind": "balance"},
-                 sender="../../etc/passwd")))
+        # G-2: unknown sender -> no LINKED account -> deterministic onboarding guidance
+        # (not a bare fall-through), naming this koine identity.
+        got = self._body(_msg({"coord": "caldera/v1", "kind": "balance"}, sender="mallory"))
+        self.assertEqual(got["kind"], "no_account")
+        self.assertEqual(got["agent"], "mallory")
+        self.assertIn("caldera.host", got["how_to_reserve"][0])
+        # path traversal in the sender name is neutralized by sanitization: it is scrubbed to a
+        # safe token (never reads outside CTX), and the guidance names that scrubbed identity.
+        got = self._body(_msg({"coord": "caldera/v1", "kind": "balance"},
+                              sender="../../etc/passwd"))
+        self.assertEqual(got["kind"], "no_account")
+        self.assertEqual(got["agent"], "etcpasswd")   # sanitized — no traversal
 
     def test_notification_gets_pipeline_ack(self):
         got = self._body(_msg({"coord": "caldera/v1", "kind": "usage_report"},

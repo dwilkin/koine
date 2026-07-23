@@ -442,7 +442,30 @@ def _machine_answer(msg):
         try:
             return _envelope(json.loads(acct.read_text()))
         except (OSError, json.JSONDecodeError):
-            return None  # no account file -> let the LLM explain
+            # G-2: no Caldera account is LINKED to this koine identity. The koine edge and the
+            # Caldera renter account are separate identity planes — a peered agent isn't
+            # automatically a Caldera renter. Guide onboarding deterministically instead of a
+            # bare "no account on file".
+            portal = os.environ.get("CALDERA_PORTAL", "https://caldera.host")
+            return _envelope({
+                "coord": "caldera/v1", "kind": "no_account",
+                "agent": sender,
+                "note": (f"No Caldera renter account is linked to your Koine identity "
+                         f"'{sender}'. The Koine edge and a Caldera renter account are "
+                         "separate — peering here lets us COORDINATE (availability, pricing, "
+                         "catalog), but to reserve GPU time your human onboards as a renter."),
+                "how_to_reserve": [
+                    f"1. Your human creates a renter account at {portal}/signup.",
+                    f"2. They 'Attach your agent' on the {portal} dashboard → a one-time "
+                    "renter attach token (ratt_).",
+                    "3. Your agent redeems it (Caldera /agent/v1/attach) → a renter token "
+                    "(ragt_), then browses listings + files a Caldera peering-request to the "
+                    "seller. Reservations run on the Caldera platform, authenticated by that "
+                    "renter token — not over this Koine edge.",
+                ],
+                "coordination_here": "This Koine caldera/v1 lane serves catalog / availability "
+                                     "/ balance (once linked) and notifications — not reserve.",
+            })
     return None
 
 
