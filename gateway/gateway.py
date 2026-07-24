@@ -511,6 +511,37 @@ def _reply_seal_check(data):
             "body arrived plaintext — possible downgrade/substitution by the transport)")
 
 
+def _unsealed_reply_disposition(data):
+    """What to do with an UNSEALED reply on an E2E edge (koine/error/v1, 2026-07-24).
+
+    Relays hold no keys by design, so their busy/timeout notes can never arrive sealed —
+    and refusing them (pre-2026-07-24 behavior) showed senders a cryptic downgrade warning
+    instead of "busy, retry". An unsealed ok=false body is therefore accepted as a
+    self-declared TRANSPORT ERROR, prominently labeled unauthenticated and never surfaced
+    as peer content. Safe: a malicious relay faking errors is equivalent to dropping
+    replies, a power any relay already has. Reply INTEGRITY is unchanged — an unsealed
+    ok=true body is still refused (that would be content substitution).
+
+    Returns ("pass", None) | ("transport_error", friendly_text) | ("refuse", reason)."""
+    if isinstance(data, dict) and data.get("ok") is False and str(data.get("body", "")).strip():
+        body_txt = str(data.get("body", ""))
+        try:
+            err = json.loads(body_txt)
+            if isinstance(err, dict) and err.get("coord") == "koine/error/v1":
+                body_txt = f"{err.get('code', 'error')}: {err.get('message', '')}"
+                if err.get("retry_after_s"):
+                    body_txt += f" (retry in ~{err['retry_after_s']}s)"
+        except json.JSONDecodeError:
+            pass
+        return "transport_error", ("[transport error — unauthenticated, not from the peer] "
+                                   f"{body_txt[:400]} — this usually means the peer side "
+                                   "was busy or timed out; retry shortly")
+    seal_err = _reply_seal_check(data)
+    if seal_err:
+        return "refuse", seal_err
+    return "pass", None
+
+
 def _route(target, msg):
     """Forward the message to the target agent's /ask endpoint; return (ok, reply, meta)."""
     card = AGENTS.get(target)
@@ -542,15 +573,18 @@ def _route(target, msg):
         with urllib.request.urlopen(req, timeout=ROUTE_TIMEOUT, context=ctx) as r:
             data = json.loads(r.read())
         if enc:
-            seal_err = _reply_seal_check(data)
-            if seal_err:
-                # audited by the caller's reply row (meta.enc_refused marks the reason)
-                return False, seal_err, {"routed": True, "enc_refused": True}
             if _crypto.is_sealed(data):
                 try:
                     data = _crypto.open_body(data, MY_PRIVKEY, peer_pub)
                 except Exception as e:
                     return False, f"reply decrypt failed: {e}", {"routed": True}
+            else:
+                disposition, text = _unsealed_reply_disposition(data)
+                if disposition == "transport_error":
+                    return False, text, {"routed": True, "transport_error": True}
+                if disposition == "refuse":
+                    # audited by the caller's reply row (meta.enc_refused marks the reason)
+                    return False, text, {"routed": True, "enc_refused": True}
         return bool(data.get("ok", True)), data.get("body", ""), {
             "routed": True, "elapsed": round(time.time() - t0, 2),
             "peer_meta": data.get("meta"),
@@ -737,6 +771,19 @@ class Handler(BaseHTTPRequestHandler):
         meta.update(auth_meta)
         meta["notify"] = notify
         meta["notify_note"] = notify_note
+
+        # Grant telemetry (2026-07-24): on a granted edge, every reply carries the live
+        # budget — cap, used, remaining, expiry. One COUNT query; kills the "how many
+        # messages do I have left?" round trip and lets well-behaved agents self-pace.
+        for edge_agent in (sender, target):
+            g = AGENTS.get(edge_agent, {}).get("grant")
+            if g:
+                cap = int(g.get("max_per_day", 20))
+                used = _msgs_last_day_edge(edge_agent)
+                meta["grant"] = {"edge": edge_agent, "cap_per_day": cap, "used_24h": used,
+                                 "remaining": max(0, cap - used),
+                                 "expires": g.get("expires", "")}
+                break
 
         # Approval-shaped reply => Telegram the recipient's human (see APPROVAL_RE above).
         # Deliberately ignores quiet hours / notify caps, same as NOTIFY_TYPES: an approval

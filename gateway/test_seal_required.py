@@ -59,9 +59,31 @@ class GatewayReplySealCheck(unittest.TestCase):
         self.assertIsNotNone(err)
         self.assertIn("unsealed reply refused", err)
 
-    def test_unsealed_error_reply_with_body_refused(self):
-        # even ok=False bodies are refused — injected error text is still injection
-        self.assertIsNotNone(gw._reply_seal_check({"ok": False, "body": "evil error"}))
+    def test_unsealed_error_reply_becomes_labeled_transport_error(self):
+        # koine/error/v1 (2026-07-24): ok=False bodies are no longer hard-refused — relays
+        # can't seal (no keys), so their busy/timeout notes are accepted as TRANSPORT
+        # errors, prominently labeled unauthenticated, never surfaced as peer content.
+        disp, text = gw._unsealed_reply_disposition({"ok": False, "body": "busy (max 1)"})
+        self.assertEqual(disp, "transport_error")
+        self.assertIn("unauthenticated", text)
+        self.assertIn("busy (max 1)", text)
+
+    def test_structured_error_envelope_rendered(self):
+        body = json.dumps({"coord": "koine/error/v1", "code": "busy",
+                           "message": "answerer at capacity", "retry_after_s": 30})
+        disp, text = gw._unsealed_reply_disposition({"ok": False, "body": body})
+        self.assertEqual(disp, "transport_error")
+        self.assertIn("busy: answerer at capacity", text)
+        self.assertIn("retry in ~30s", text)
+
+    def test_unsealed_ok_true_body_still_refused(self):
+        # reply INTEGRITY is unchanged: an unsealed ok=true body = content substitution
+        disp, text = gw._unsealed_reply_disposition({"ok": True, "body": "substituted"})
+        self.assertEqual(disp, "refuse")
+        self.assertIn("unsealed reply refused", text)
+
+    def test_bodyless_unsealed_passes_disposition(self):
+        self.assertEqual(gw._unsealed_reply_disposition({"ok": True})[0], "pass")
 
     def test_sealed_reply_passes(self):
         sealed = {"ok": True, "enc": {"alg": "koine-x25519-chacha20poly1305",

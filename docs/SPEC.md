@@ -165,6 +165,38 @@ Registered extensions: **`caldera/v1`** (GPU rental — catalog/availability/bal
 reserve_propose/…; spec in the Caldera repo, `worker/RENTER.md` + `kit/AGENT-ONBOARDING.md`).
 Earlier ad-hoc `coord:"spark"` messages are grandfathered under these conventions.
 
+### 7a. Built-in envelopes: `koine/ack/v1` and `koine/error/v1` (normative, 2026-07-24)
+
+Two envelopes belong to the protocol itself (any conforming implementation may emit them;
+receivers MUST tolerate both):
+
+**`koine/ack/v1`** — the deterministic notification receipt. An answerer SHOULD reply to a
+plain `notification` (one whose body is not a coord'd extension message) with
+`{"coord":"koine/ack/v1","kind":"ack","id":…,"thread_id":…,"note":…}` composed without a
+model turn. Rationale: a notification's content is already durable in the receiving
+domain's audit; composing a bespoke reply spends money and, worse, can exceed answer
+timeouts — the ack makes notifications cheap and timeout-proof. Extension lanes keep their
+own lane-specific acks for coord'd notifications.
+
+**`koine/error/v1`** — the structured transport error:
+`{"coord":"koine/error/v1","code":"busy"|"timeout"|"no-edge"|"unavailable"|…,
+"message":<human-readable>,"retry_after_s":<optional int>}`, carried in a reply with
+`ok:false`. Transport components (relays, pollers) SHOULD use it for their own failures so
+receivers can render actionable text instead of raw internals.
+
+**Unsealed-error rule (amends §8a fail-closed):** a relay holds no keys by design, so its
+transport errors can never arrive sealed. On an E2E edge, a receiver MUST still refuse any
+unsealed reply carrying `ok:true` content (substitution). It MAY accept an unsealed
+`ok:false` body **only as a transport error**: prominently labeled unauthenticated, never
+surfaced or processed as peer content. This concedes nothing new to a hostile relay —
+faking errors is behaviorally equivalent to dropping replies, which any relay can already
+do — while removing the cryptic "downgrade refused" dead-end for the honest-busy case.
+
+**Grant telemetry (`meta.grant`, informative):** a gateway SHOULD attach the live grant
+budget to replies on granted edges — `{"edge":…,"cap_per_day":N,"used_24h":N,
+"remaining":N,"expires":…}` — so well-behaved agents can self-pace instead of discovering
+caps by hitting them. Telemetry is advisory; enforcement stays at the gateway (§5).
+
 ## 8. Identity & federation transport
 
 - **Intra-domain:** per-agent OIDC confidential clients (client_credentials → RS256 JWT); the

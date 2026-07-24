@@ -388,7 +388,19 @@ def _machine_answer(msg):
     try:
         body = json.loads(str(msg.get("body", "")))
     except (json.JSONDecodeError, TypeError):
-        return None
+        body = None
+    # koine/ack/v1 (2026-07-24): a plain notification gets a deterministic ack — the content
+    # is already in the audit log either way, and spending an LLM turn composing a reply
+    # nobody needs is how notifications time out (observed on a live edge). Coord'd
+    # notifications fall through: their lanes carry lane-specific acks.
+    if (str(msg.get("type", "")) == "notification"
+            and not (isinstance(body, dict) and body.get("coord"))):
+        return (json.dumps({
+            "coord": "koine/ack/v1", "kind": "ack",
+            "id": msg.get("id"), "thread_id": msg.get("thread_id"),
+            "note": "notification received and audited (deterministic ack — no LLM turn "
+                    "was spent; the content is in this domain's audit for its human/agent)",
+        }), {"machine_lane": True, "cost_usd": 0.0, "elapsed": 0.0})
     if not isinstance(body, dict):
         return None
     coord = body.get("coord")
