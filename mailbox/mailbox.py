@@ -309,17 +309,26 @@ def _deliver_local(frm, to, msg, mtype):
     ev_new.set()
     _audit_write("relay_queued", frm=frm, to=to, id=msg["id"], type=mtype)
     if mtype == "notification":
-        return 202, {"ok": True, "body": "queued", "id": msg["id"],
-                     "thread_id": msg["thread_id"]}
+        # koine/ack/v1 (SPEC 7a): self-describing transport receipt — a relay holds no keys,
+        # so this ack is deliberately structured for the sender's unsealed-ack carve-out.
+        return 202, {"ok": True, "id": msg["id"], "thread_id": msg["thread_id"],
+                     "body": json.dumps({"coord": "koine/ack/v1", "kind": "queued",
+                                         "origin": "relay",
+                                         "note": "notification queued for delivery"})}
     ok = ev.wait(REPLY_TIMEOUT)
     with _lock:
         EVENTS.pop(msg["id"], None)
         REPLY_OWNER.pop(msg["id"], None)
         reply = RESULTS.pop(msg["id"], None)
     if not ok or reply is None:
+        # koine/error/v1 (SPEC 7a): structured transport error — receiving gateways render
+        # this as a labeled, actionable message instead of a cryptic seal refusal.
         return 504, {"ok": False,
-                     "body": f"no reply from '{to}' within {REPLY_TIMEOUT}s "
-                             "(recipient poller down or slow?)"}
+                     "body": json.dumps({"coord": "koine/error/v1", "code": "timeout",
+                                         "message": f"no reply from '{to}' within "
+                                                    f"{REPLY_TIMEOUT}s (recipient poller "
+                                                    "down or slow?)",
+                                         "retry_after_s": 60})}
     _lf.log_exchange(
         trace_id=msg.get("thread_id") or msg["id"],
         name=f"{frm}->{to}:{mtype}", sender=frm, target=to, mtype=mtype,

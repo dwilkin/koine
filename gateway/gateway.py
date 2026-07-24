@@ -511,7 +511,7 @@ def _reply_seal_check(data):
             "body arrived plaintext — possible downgrade/substitution by the transport)")
 
 
-def _unsealed_reply_disposition(data):
+def _unsealed_reply_disposition(data, request_type=""):
     """What to do with an UNSEALED reply on an E2E edge (koine/error/v1, 2026-07-24).
 
     Relays hold no keys by design, so their busy/timeout notes can never arrive sealed —
@@ -522,7 +522,25 @@ def _unsealed_reply_disposition(data):
     replies, a power any relay already has. Reply INTEGRITY is unchanged — an unsealed
     ok=true body is still refused (that would be content substitution).
 
-    Returns ("pass", None) | ("transport_error", friendly_text) | ("refuse", reason)."""
+    Returns ("pass", None) | ("transport_error", friendly_text) |
+    ("transport_ack", friendly_text) | ("refuse", reason)."""
+    # Notification carve-out: the relay 202-acks notifications itself ("queued") without
+    # waiting for the peer — a transport receipt it can never seal. Accepting it (labeled,
+    # notifications only) concedes nothing: faking "queued" ≡ dropping the notification,
+    # which a relay can already do. Questions keep full reply integrity below.
+    if (request_type == "notification" and isinstance(data, dict)
+            and data.get("ok") is True):
+        body_raw = str(data.get("body", "")).strip()
+        ackish = body_raw.lower() == "queued"          # legacy relay string
+        if not ackish:
+            try:
+                b = json.loads(body_raw)
+                ackish = isinstance(b, dict) and b.get("coord") == "koine/ack/v1"
+            except json.JSONDecodeError:
+                ackish = False
+        if ackish:
+            return "transport_ack", ("[transport ack — unauthenticated] the relay queued "
+                                     "the notification for delivery to the peer")
     if isinstance(data, dict) and data.get("ok") is False and str(data.get("body", "")).strip():
         body_txt = str(data.get("body", ""))
         try:
@@ -579,7 +597,11 @@ def _route(target, msg):
                 except Exception as e:
                     return False, f"reply decrypt failed: {e}", {"routed": True}
             else:
-                disposition, text = _unsealed_reply_disposition(data)
+                disposition, text = _unsealed_reply_disposition(
+                    data, str(msg.get("type", "")))
+                if disposition == "transport_ack":
+                    return True, text, {"routed": True, "transport_ack": True,
+                                        "elapsed": round(time.time() - t0, 2)}
                 if disposition == "transport_error":
                     return False, text, {"routed": True, "transport_error": True}
                 if disposition == "refuse":

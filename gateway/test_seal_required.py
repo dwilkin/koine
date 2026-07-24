@@ -85,6 +85,31 @@ class GatewayReplySealCheck(unittest.TestCase):
     def test_bodyless_unsealed_passes_disposition(self):
         self.assertEqual(gw._unsealed_reply_disposition({"ok": True})[0], "pass")
 
+    def test_notification_queued_ack_accepted_legacy(self):
+        # relay 202-acks notifications plaintext ("queued") — accepted labeled, notif only
+        disp, text = gw._unsealed_reply_disposition(
+            {"ok": True, "body": "queued"}, request_type="notification")
+        self.assertEqual(disp, "transport_ack")
+        self.assertIn("unauthenticated", text)
+
+    def test_notification_queued_ack_accepted_structured(self):
+        body = json.dumps({"coord": "koine/ack/v1", "kind": "queued", "origin": "relay"})
+        disp, _ = gw._unsealed_reply_disposition(
+            {"ok": True, "body": body}, request_type="notification")
+        self.assertEqual(disp, "transport_ack")
+
+    def test_question_with_queued_body_still_refused(self):
+        # the carve-out is notification-only: a "queued" answer to a QUESTION would let a
+        # relay suppress real answers while looking successful
+        disp, _ = gw._unsealed_reply_disposition(
+            {"ok": True, "body": "queued"}, request_type="question")
+        self.assertEqual(disp, "refuse")
+
+    def test_notification_arbitrary_ok_body_still_refused(self):
+        disp, _ = gw._unsealed_reply_disposition(
+            {"ok": True, "body": "definitely not an ack"}, request_type="notification")
+        self.assertEqual(disp, "refuse")
+
     def test_sealed_reply_passes(self):
         sealed = {"ok": True, "enc": {"alg": "koine-x25519-chacha20poly1305",
                                       "n": "bm9uY2U=", "ct": "Y3Q="}}
