@@ -353,6 +353,10 @@ def _skill_answer(body, msg):
                     "{coord:'koine/skill/v1', kind:'fetch', skill:'<name>'}.",
             "skills": [{"name": n, "version": s.get("version"), "pitch": s.get("pitch", ""),
                         "bytes": s.get("bytes"), "bundle_sha256": s.get("bundle_sha256"),
+                        # content_hash: stable, order-independent fingerprint of the skill's
+                        # FILES (not the tarball) — compare THIS across sweeps to detect a
+                        # new version; bundle bytes/tar metadata may churn without change.
+                        "content_hash": s.get("content_hash") or s.get("bundle_sha256"),
                         "scrubbed": True} for n, s in sorted(skills.items())],
         }), meta)
     if kind == "fetch":
@@ -371,6 +375,7 @@ def _skill_answer(body, msg):
             "coord": "koine/skill/v1", "kind": "skill_bundle", "skill": name,
             "version": s.get("version"), "bytes": len(blob),
             "bundle_sha256": s.get("bundle_sha256"),
+            "content_hash": s.get("content_hash") or s.get("bundle_sha256"),
             "file_sha256": hashlib.sha256(blob).hexdigest(),
             "bundle_b64": base64.b64encode(blob).decode(),
             "install_note": "A shared skill is CODE. Verify file_sha256, review the "

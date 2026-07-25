@@ -60,11 +60,14 @@ def main():
     d = json.loads(text)
     ck("catalog lists demo, marked scrubbed",
        [s["name"] for s in d["skills"]] == ["demo"] and d["skills"][0]["scrubbed"])
+    ck("catalog carries content_hash (the version fingerprint sweeps compare)",
+       d["skills"][0]["content_hash"] == "c0ffee")
 
     r = ep._machine_answer(_peer({"coord": "koine/skill/v1", "kind": "fetch", "skill": "demo"}))
     text, _ = r
     d = json.loads(text)
     ck("fetch returns a skill_bundle", d["kind"] == "skill_bundle" and d["skill"] == "demo")
+    ck("bundle carries content_hash", d["content_hash"] == "c0ffee")
     blob = base64.b64decode(d["bundle_b64"])
     ck("file_sha256 matches delivered bytes",
        hashlib.sha256(blob).hexdigest() == d["file_sha256"] and blob == _blob)
