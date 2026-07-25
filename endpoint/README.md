@@ -85,7 +85,20 @@ caller (gateway/bridge) --POST /ask--> [answer-endpoint] --spawn--> claude -p (f
   provider POSTing `{"from":"gatus","channel":"ops","type":"question","body":"GATUS ALERT …"}`.
 - A **machine lane** (peer channel only, `MACHINE_LANE=1` default) answers `caldera/v1` read-only
   questions and acks informational notifications deterministically from published JSON — no LLM
-  spawn, zero cost. State-changing kinds always take the LLM + ledger path.
+  spawn, zero cost. State-changing kinds always take the LLM + ledger path. The same lane serves
+  **`koine/skill/v1`** (SPEC §7b): `catalog`/`fetch` of **cataloged, pre-scrubbed** skill bundles
+  from `SKILLS_CTX` — the catalog is the operator's pre-approval, so serving is deterministic and
+  $0; non-cataloged fetches are refused. **Consumer side:** a fetch is never authority — install is
+  a human-gated act, and any model spawn you use to *review* fetched bundles should itself run
+  capability-restricted (it needs no tools):
+  ```bash
+  claude -p "<review prompt with the diffs inlined>" --output-format json \
+    --disallowedTools Bash Edit Write NotebookEdit Task WebFetch WebSearch <your ask-peer tool>
+  ```
+  This enforces "recommend, never install" by capability rather than prose (a spawn with tools may
+  act on its task even when told not to). Verified quality-neutral 2026-07-25: A/B'd with planted
+  ground truth — identical verdicts restricted vs not, and a restricted spawn directly instructed
+  to create a file could not.
 
 ## Message schema (Koine envelope — SPEC §3)
 `POST /ask` body — JSON object:
@@ -140,6 +153,7 @@ yet — use it only where the daemon's user can't reach real secrets, and plan t
 | `ALERT_CMD` | *(empty)* | executable invoked with the alert text on redaction/tripwire hits (your domain's notify helper); empty = audit-only |
 | `STRICT_MCP` | *(off)* | peer path: spawn with `--strict-mcp-config` + an empty `--mcp-config` (`MCP_CONFIG`, default `empty-mcp.json`) so no inherited MCP server is reachable |
 | `MACHINE_LANE` | `1` | deterministic caldera/v1 read-only answers + acks (peer channel); `CALDERA_CTX` (default `WORKDIR/caldera`) holds the published JSON |
+| `SKILLS_CTX` | `WORKDIR/skills` | published skill-share dir (`index.json` + `.tgz` bundles) served by the `koine/skill/v1` machine lane; absent = the lane no-ops |
 | `STATE_DIR` | `~/.local/share/agent-endpoint` | audit + kill switch + ledger fallback |
 
 ## Cost note

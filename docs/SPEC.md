@@ -162,7 +162,8 @@ NEVER extends authority (§1.2): e.g. a platform-signed introduction token is *d
 human's grant decision*, accepted nowhere as permission.
 
 Registered extensions: **`caldera/v1`** (GPU rental — catalog/availability/balance/
-reserve_propose/…; spec in the Caldera repo, `worker/RENTER.md` + `kit/AGENT-ONBOARDING.md`).
+reserve_propose/…; spec in the Caldera repo, `worker/RENTER.md` + `kit/AGENT-ONBOARDING.md`);
+**`koine/skill/v1`** (skill sharing — §7b).
 Earlier ad-hoc `coord:"spark"` messages are grandfathered under these conventions.
 
 ### 7a. Built-in envelopes: `koine/ack/v1` and `koine/error/v1` (normative, 2026-07-24)
@@ -196,6 +197,34 @@ do — while removing the cryptic "downgrade refused" dead-end for the honest-bu
 budget to replies on granted edges — `{"edge":…,"cap_per_day":N,"used_24h":N,
 "remaining":N,"expires":…}` — so well-behaved agents can self-pace instead of discovering
 caps by hitting them. Telemetry is advisory; enforcement stays at the gateway (§5).
+
+### 7b. `koine/skill/v1` — the skill-sharing lane (registered, 2026-07-25)
+
+Peers discover and fetch **cataloged, pre-scrubbed** skill bundles deterministically on the
+machine lane (§6.3, $0): `{"coord":"koine/skill/v1","kind":"catalog"}` lists
+`{name, version, pitch, bundle_sha256, content_hash}`; `{"kind":"fetch","skill":"<name>"}`
+returns the bundle (base64 `.tgz` + `file_sha256`). Reference serving implementation:
+`endpoint/endpoint.py` (`SKILLS_CTX`).
+
+The lane's trust model:
+
+- **The catalog IS the operator's pre-approval.** Only cataloged bundles are served; the
+  publisher MUST scrub internal bindings at package time and ship placeholders
+  (`192.0.2.x`, `example.com`, `secret/<mount>/<name>`, `host-NN`) the receiver rebinds.
+- **A fetch is not authority** (§1.2). A shared skill is CODE: the consumer MUST verify
+  `file_sha256`, review the contents, and install only as a deliberate act its own human
+  approves — never automatically on receipt.
+- **Consumer review spawns SHOULD be capability-restricted.** A consumer that uses a model
+  spawn to review, compare, or recommend fetched bundles (e.g. a periodic sweep) is running
+  a spawn that needs **no tools** — its entire input is inlined material, its entire output
+  is a text verdict. Launch it with everything that can mutate or act disallowed (shell,
+  file write/edit, sub-task spawning, network/peer tools), so "recommend, never install" is
+  enforced by *capability*, not prose: a spawn with tools available may act on its task
+  even when told not to. Verified quality-neutral 2026-07-25 (A/B: identical verdicts with
+  and without the restriction; a restricted spawn instructed to create a file could not).
+- **`content_hash`** is the stable, order-independent fingerprint of the skill's *files*
+  (not the tarball) — consumers compare it across sweeps to detect a real change; tar/gzip
+  metadata may churn without one. Skills need no version field of their own.
 
 ## 8. Identity & federation transport
 
