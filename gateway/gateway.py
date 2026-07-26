@@ -288,16 +288,24 @@ def _identify(headers):
 
 # OIDC clientId (azp) -> agent-name mapping. Set OIDC_CLIENT_MAP="clientA=agent1,clientB=agent2"
 # explicitly, or rely on the default convention: a client named "agent-<name>" maps to <name>
-# (e.g. dedicated per-agent clients agent-atlas -> atlas); any other azp is used as-is.
-# Either way the result must still be a known agent (checked by the caller).
+# (e.g. dedicated per-agent clients agent-atlas -> atlas).
 _OIDC_CLIENT_MAP = dict(
     p.split("=", 1) for p in os.environ.get("OIDC_CLIENT_MAP", "").split(",") if "=" in p)
 
 
 def _client_to_agent(azp):
+    """Resolve an OIDC clientId (azp) to an agent name, or None if it doesn't resolve.
+
+    STRICT (no raw-azp fallback): an azp is accepted ONLY if it's in the explicit
+    OIDC_CLIENT_MAP, or (when no map is set) matches the `agent-<name>` convention. A client
+    that resolves to nothing returns None — so a Keycloak client literally named like an agent
+    (`atlas`) can NOT authenticate AS that agent by name-collision. This matters most under
+    federation, where more parties can mint clients. The caller still checks the result is a
+    known agent, but that check alone was insufficient because the raw-azp fallback made any
+    bare agent-named client resolve to that agent. (Hardened 2026-07-26.)"""
     if _OIDC_CLIENT_MAP:
-        return _OIDC_CLIENT_MAP.get(azp, azp)
-    return azp[len("agent-"):] if azp.startswith("agent-") else azp
+        return _OIDC_CLIENT_MAP.get(azp)   # None when unmapped — no passthrough
+    return azp[len("agent-"):] if azp.startswith("agent-") else None
 
 
 # ---- caps ------------------------------------------------------------------
