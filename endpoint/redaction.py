@@ -52,10 +52,10 @@ _SECRET_PATTERNS = [
     ("long_hex", re.compile(r"\b[0-9a-fA-F]{96,}\b")),
 ]
 
-# key=value / key: value assignments — keep the key name, redact the value.
+# key=value / key: value assignments — keep the key name (and any quoting), redact the value.
 _ASSIGN = re.compile(
     r"(?i)((?:api[_-]?key|secret|client[_-]?secret|access[_-]?key|token|password|passwd|pwd|"
-    r"bearer)\s*[:=]\s*)[\"']?([^\s\"']{6,})")
+    r"bearer)\s*[:=]\s*[\"']?)([^\s\"']{6,})([\"']?)")
 
 # Inbound secret-SEEKING terms (tripwire). Detects intent, not values. Broadened 2026-07-23
 # (KO-H1): unseal keys, credential files (.aws/credentials, .netrc, .pgpass), process-env
@@ -81,7 +81,7 @@ def redact(text):
             out = pat.sub(REDACTION, out)
             hits.append(label)
     if _ASSIGN.search(out):
-        out = _ASSIGN.sub(lambda m: m.group(1) + REDACTION, out)
+        out = _ASSIGN.sub(lambda m: m.group(1) + REDACTION + m.group(3), out)
         hits.append("assignment")
     return out, sorted(set(hits))
 
