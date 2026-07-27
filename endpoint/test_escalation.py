@@ -27,6 +27,10 @@ for i, a in enumerate(sys.argv):
 if model == os.environ.get("FAIL_MODEL", ""):
     sys.stderr.write("simulated failure on " + model)
     sys.exit(1)
+if model == os.environ.get("USAGELIMIT_MODEL", ""):
+    # real CLI prints plan/usage errors to STDOUT (stderr stays empty)
+    print("Claude AI usage limit reached|1753600000")
+    sys.exit(1)
 if model == os.environ.get("SOFTFAIL_MODEL", ""):
     print(json.dumps({"result": "confused", "is_error": True}))
     sys.exit(0)
@@ -51,6 +55,18 @@ class EscalationTest(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("FAIL_MODEL", None)
         os.environ.pop("SOFTFAIL_MODEL", None)
+        os.environ.pop("USAGELIMIT_MODEL", None)
+
+    def test_usage_limit_on_stdout_is_captured_and_flagged(self):
+        # usage-limit errors print to STDOUT; a stderr-only capture made them bare 502s
+        os.environ["USAGELIMIT_MODEL"] = "opus"
+        os.environ["FAIL_MODEL"] = ""
+        ok, text, meta, timed_out = endpoint._spawn_once(MSG, "opus")
+        self.assertFalse(ok)
+        self.assertIn("usage limit reached", text)          # stdout tail surfaced
+        self.assertIn("MODEL USAGE LIMIT", text)            # flagged, not a bare exit code
+        self.assertTrue(meta.get("usage_limited"))
+        self.assertFalse(timed_out)
 
     def test_primary_success_no_escalation(self):
         ok, text, meta = endpoint._answer(MSG)

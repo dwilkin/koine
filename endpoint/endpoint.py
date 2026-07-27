@@ -593,8 +593,21 @@ def _spawn_once(msg, model):
         return False, f"answer timed out after {timeout}s", {"elapsed": timeout}, True
     elapsed = round(time.time() - t0, 2)
     if proc.returncode != 0:
-        return (False, f"claude -p exited {proc.returncode}: {proc.stderr[:500]}",
-                {"elapsed": elapsed}, False)
+        # Capture BOTH streams: the CLI writes usage-limit/plan errors to STDOUT, so a
+        # stderr-only capture surfaced them as bare 502s with an empty reason (the
+        # Genie-Telegram-502 incident — [[genie-human-channel-opus-pro]]). Keep the tail of
+        # stdout (errors print last) and flag the usage-limit case explicitly so the audit
+        # and any human-facing relay say WHY.
+        err = (proc.stderr or "").strip()
+        out = (proc.stdout or "").strip()
+        parts = [p for p in (err[:500], out[-500:]) if p]
+        detail = " || stdout: ".join(parts) if len(parts) == 2 else (parts[0] if parts else "")
+        meta = {"elapsed": elapsed}
+        if any(s in (err + " " + out).lower()
+               for s in ("usage limit", "usage_limit", "limit reached", "out of credits")):
+            meta["usage_limited"] = True
+            detail = f"MODEL USAGE LIMIT (plan/credits exhausted — not a code fault): {detail}"
+        return (False, f"claude -p exited {proc.returncode}: {detail}", meta, False)
     try:
         data = json.loads(proc.stdout)
         text = data.get("result", "")
