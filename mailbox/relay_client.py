@@ -10,14 +10,26 @@ this agent's per-agent RELAY_TOKEN and returns the relay's response:
 
 (The RECEIVE side of relay mode is the standard poller with POLL_PATH=/inbox.)
 
+MULTI-PEER (default for any agent with more than one edge): set PEERS_FILE=@/path.json =
+{"<agent>":{"pubkey":"…"}} — the SAME file the receive-side poller uses, and the same file
+koine's edge-sync already writes. Then this client will send to ANY peer in that map, sealing
+per-peer with that peer's key. SIGHUP hot-reloads it, so a newly-approved edge becomes sendable
+without a restart. Single-peer mode (PEER_AGENT, no PEERS_FILE) is unchanged for back-compat.
+
+Peering is many-to-many by design (SPEC §5): an agent accumulates edges over time, so the send
+side must not be pinned to one peer. It used to be, which meant an agent could RECEIVE from
+many peers (the poller has had MULTI for a while) but only ever SEND to one — fixed 2026-07-27.
+
 Env:
   LOCAL_AGENT    this agent (informational; the relay derives identity from RELAY_TOKEN)
-  PEER_AGENT     the edge's remote peer — the only accepted `to`
+  PEER_AGENT     single-peer mode: the edge's remote peer — the only accepted `to`
+                 (optional when PEERS_FILE is set)
   RELAY_URL      e.g. https://mailbox.koine.network:8443
   RELAY_TOKEN    this agent's per-agent bearer at the relay
   LOCAL_TOKEN    bearer required on the loopback /message side
 Optional:
-  LOCAL_PORT (default 8091), REPLY_TIMEOUT (default 210), DOMAIN (observability label),
+  PEERS_FILE (multi-peer routing; see above), LOCAL_PORT (default 8091),
+  REPLY_TIMEOUT (default 210), DOMAIN (observability label),
   RELAY_CA (pin a self-signed relay cert; omit for a publicly-trusted one)
 """
 import json
@@ -38,7 +50,12 @@ except Exception:  # pragma: no cover
             return None
 
 LOCAL_AGENT = os.environ["LOCAL_AGENT"].strip()
-PEER_AGENT = os.environ["PEER_AGENT"].strip()
+PEERS_FILE = os.environ.get("PEERS_FILE", "").strip()
+MULTI = bool(PEERS_FILE)
+# single-peer mode still REQUIRES PEER_AGENT; multi mode makes it optional (and uses it only as
+# the default `to` when a caller omits one, preserving old one-peer call sites verbatim).
+PEER_AGENT = (os.environ.get("PEER_AGENT", "") if MULTI
+              else os.environ["PEER_AGENT"]).strip()
 RELAY_URL = os.environ["RELAY_URL"].rstrip("/")
 RELAY_TOKEN = os.environ["RELAY_TOKEN"].strip()
 LOCAL_TOKEN = os.environ["LOCAL_TOKEN"].strip()
@@ -52,8 +69,39 @@ RELAY_CA = os.environ.get("RELAY_CA", "").strip()
 MY_PRIVKEY = os.environ.get("MY_PRIVKEY", "").strip()
 PEER_PUBKEY = os.environ.get("PEER_PUBKEY", "").strip()
 ENC = bool(MY_PRIVKEY and PEER_PUBKEY)
-if ENC:
+if ENC or (MULTI and MY_PRIVKEY):
     import crypto
+
+_PEERS = {}
+
+
+def _load_peers():
+    """{'<agent>': {'pubkey': '…'}} — same shape the poller and edge-sync use."""
+    global _PEERS
+    if not PEERS_FILE:
+        return
+    path = PEERS_FILE[1:] if PEERS_FILE.startswith("@") else PEERS_FILE
+    try:
+        _PEERS = json.load(open(path))
+    except Exception as e:
+        print(f"peers file unreadable ({path}): {e}", flush=True)
+
+
+def _resolve(to: str):
+    """(target_agent, peer_pubkey_or_'', error_or_None) for an outbound `to`."""
+    if MULTI:
+        target = to or PEER_AGENT
+        if not target:
+            return None, "", "`to` is required (this client serves multiple peers)"
+        rec = _PEERS.get(target)
+        if rec is None:
+            known = sorted(_PEERS)
+            return None, "", (f"no edge to '{target}' — known peers: {known or 'none yet'}. "
+                              "A newly approved edge appears after the next edge-sync + SIGHUP.")
+        return target, str((rec or {}).get("pubkey", "")), None
+    if to != PEER_AGENT:
+        return None, "", f"this edge only reaches '{PEER_AGENT}'"
+    return PEER_AGENT, PEER_PUBKEY, None
 
 CTX = ssl.create_default_context(cafile=RELAY_CA) if RELAY_CA else ssl.create_default_context()
 
@@ -95,15 +143,20 @@ class Handler(BaseHTTPRequestHandler):
             msg = None
         if not isinstance(msg, dict):
             return self._send(400, {"error": "bad body"})
-        if str(msg.get("to", "")).strip() != PEER_AGENT:
-            return self._send(403, {"error": f"this edge only reaches '{PEER_AGENT}'"})
+        target, peer_pub, err = _resolve(str(msg.get("to", "")).strip())
+        if err:
+            return self._send(403, {"error": err})
         msg["from"] = LOCAL_AGENT   # informational; the relay re-derives from RELAY_TOKEN
-        msg["to"] = PEER_AGENT
+        msg["to"] = target
         msg.setdefault("id", os.urandom(6).hex())
         msg.setdefault("thread_id", msg["id"])
         msg.setdefault("ts", _now())
         msg.setdefault("type", "question")
-        wire = crypto.seal_body(msg, MY_PRIVKEY, PEER_PUBKEY) if ENC else msg
+        # Seal per-peer: in MULTI the key comes from the peers file, so each edge gets its own
+        # ciphertext. A peer with no pubkey on file goes plaintext (bootstrap case) rather than
+        # failing shut — the relay still enforces the edge grant either way.
+        enc = bool(MY_PRIVKEY and peer_pub)
+        wire = crypto.seal_body(msg, MY_PRIVKEY, peer_pub) if enc else msg
         req = urllib.request.Request(
             RELAY_URL + "/ask", data=json.dumps(wire).encode(),
             headers={"Content-Type": "application/json",
@@ -121,15 +174,15 @@ class Handler(BaseHTTPRequestHandler):
             status = e.code
         except Exception as e:
             return self._send(502, {"ok": False, "body": f"relay unreachable: {e}"})
-        if ENC and crypto.is_sealed(reply):   # decrypt the reply body for our own agent
+        if enc and crypto.is_sealed(reply):   # decrypt the reply body for our own agent
             try:
-                reply = crypto.open_body(reply, MY_PRIVKEY, PEER_PUBKEY)
+                reply = crypto.open_body(reply, MY_PRIVKEY, peer_pub)
             except Exception as e:
                 reply = {"ok": False, "body": f"reply decrypt failed: {e}"}
         _lf.log_exchange(
             trace_id=msg.get("thread_id") or msg["id"],
-            name=f"{LOCAL_AGENT}->{PEER_AGENT}:{msg.get('type', 'question')}",
-            sender=LOCAL_AGENT, target=PEER_AGENT,
+            name=f"{LOCAL_AGENT}->{target}:{msg.get('type', 'question')}",
+            sender=LOCAL_AGENT, target=target,
             mtype=str(msg.get("type", "question")),
             body=msg.get("body", ""), reply=str(reply.get("body", "")),
             ok=bool(reply.get("ok")), domain=DOMAIN)
@@ -137,9 +190,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    _load_peers()
+    if MULTI:      # hot-reload the peer set (edge-sync adds peers) on SIGHUP — same as the poller
+        import signal
+        signal.signal(signal.SIGHUP, lambda *_: (_load_peers(),
+                      print(f"koine-relay-client: peers reloaded — {len(_PEERS)} peer(s)",
+                            flush=True)))
     srv = ThreadingHTTPServer(("127.0.0.1", LOCAL_PORT), Handler)
-    print(f"koine-relay-client: 127.0.0.1:{LOCAL_PORT}/message -> {RELAY_URL}/ask "
-          f"[{LOCAL_AGENT} -> {PEER_AGENT}]", flush=True)
+    where = (f"MULTI {sorted(_PEERS) or 'no peers yet'}" if MULTI else f"{LOCAL_AGENT} -> {PEER_AGENT}")
+    print(f"koine-relay-client: 127.0.0.1:{LOCAL_PORT}/message -> {RELAY_URL}/ask [{where}]",
+          flush=True)
     srv.serve_forever()
 
 
