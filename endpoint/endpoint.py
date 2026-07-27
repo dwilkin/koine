@@ -73,6 +73,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Phase A hardening (2026-07-06): output-redaction + inbound-tripwire backstop (peer path only).
 from redaction import redact, scan_inbound
+import security_events
 
 AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "").strip()
@@ -112,9 +113,12 @@ MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "65536"))
 DISALLOWED_TOOLS = os.environ.get(
     "DISALLOWED_TOOLS", "mcp__ask-peer__ask_peer,Edit,Write,WebFetch,WebSearch").strip()
 DISALLOWED_TOOLS_HUMAN = os.environ.get("DISALLOWED_TOOLS_HUMAN", "").strip()
-# Domain-specific proactive-notify helper for security alerts (redaction/tripwire hits) —
-# any executable taking the alert text as argv[1] (e.g. a notify-<human>.sh that Telegrams
-# the agent's human). Empty = audit-only (no push).
+# OPTIONAL domain-specific push helper for security alerts (redaction/tripwire hits) — any
+# executable taking the alert text as argv[1] (e.g. a notify-<human>.sh that Telegrams the
+# agent's human). Empty = no push, which is FINE: since 2026-07-27 every such event is also
+# written to the portable security journal (security_events.py) and mirrored to the agent's
+# koine.network dashboard by security_forward.py, so no operator needs a third-party notifier
+# to see that their agent was probed. ALERT_CMD is now one sink among several, not the only one.
 ALERT_CMD = os.environ.get("ALERT_CMD", "").strip()
 PERMISSION_MODE_HUMAN = os.environ.get("PERMISSION_MODE_HUMAN", "").strip()
 # Phase B (2026-07-06): set on the UNPRIVILEGED peer daemon so it structurally refuses the human
@@ -176,11 +180,28 @@ def _audit(record):
             f.write(line + "\n")
 
 
+def _security_event(kind, severity, peer, summary, detail=None):
+    """Journal a security detection to the portable event log (security-events.jsonl).
+
+    This is the sink that works EVERYWHERE — no notifier binary, no third-party service, and
+    writable by an unprivileged sandboxed answerer (it's just a file next to the audit). A
+    forwarder (security_forward.py, run as the agent's own user on a timer) mirrors it into the
+    operator's koine.network dashboard. Never raises; also mirrored into the audit for one
+    chronological record.
+    """
+    event = security_events.record(STATE_DIR, kind, severity, peer, summary, detail)
+    _audit({"event": "security_event", "kind": kind, "severity": severity,
+            "peer": peer, "event_id": (event or {}).get("event_id"),
+            "detail": detail or {}})
+    return event
+
+
 def _alert(text):
-    """Best-effort security alert to the host's human via its notify helper. Never blocks the
-    answer or raises: on failure (missing helper, quiet-hours 429, etc.) we still have the durable
-    audit event. Phase B note: when the peer daemon drops to an unprivileged user without Vault
-    reach, this helper won't authenticate — alerting must then move to a privileged audit-tailer."""
+    """Best-effort PUSH of a security alert via the host's optional notify helper. Never blocks
+    the answer or raises: on failure (missing helper, quiet-hours 429, etc.) the durable record
+    is already in the security journal + audit. Phase B note: an unprivileged peer daemon
+    without credential reach can't authenticate a push — which is exactly why the journal +
+    dashboard mirror, not this helper, is the guaranteed path."""
     if not ALERT_CMD:
         return
     try:
@@ -738,6 +759,10 @@ class Handler(BaseHTTPRequestHandler):
                     "channel": msg.get("channel"), "body": audit_body,
                     "tripwire": tripwire or None})
             if tripwire:
+                _security_event(
+                    "tripwire", "warning", msg.get("from"),
+                    "inbound message used secret-seeking terms; answered under peer rules",
+                    {"labels": list(tripwire), "message_id": str(msg.get("id", ""))[:64]})
                 _alert(f"⚠️ A2A inbound tripwire from {msg.get('from')}: secret-seeking "
                        f"terms {tripwire}. Body audited; peer answerer still runs privileged until "
                        f"Phase B. Review the gateway /audit.")
@@ -759,6 +784,11 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": ok, "meta": meta, "answer": text,
                     "redaction": redaction_hits or None})
             if redaction_hits:
+                _security_event(
+                    "redaction", "critical", msg.get("from"),
+                    "a secret-shaped string was scrubbed from an outbound reply — "
+                    "possible exfiltration attempt",
+                    {"labels": list(redaction_hits), "message_id": str(msg.get("id", ""))[:64]})
                 _alert(f"⚠️ A2A output redaction fired answering {msg.get('from')}: "
                        f"{redaction_hits}. A secret-shaped string was scrubbed from the reply and "
                        f"the audit. Investigate — this is the exfil signal, not just noise.")
