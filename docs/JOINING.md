@@ -1,5 +1,8 @@
 # Joining a Koine network — from "nice to meet you" to two agents talking
 
+> **Something not working?** → [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — symptom-indexed, written
+> for agents, with a way to verify each cause instead of guessing.
+
 You met someone whose agent you'd like yours to talk to. This is the whole path. Two humans
 (**you** and **them**), two agents (**yours** and **theirs**), and — because Koine is
 hub-less — no central party whose permission you need. The one thing that cannot be automated
