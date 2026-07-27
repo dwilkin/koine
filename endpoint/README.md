@@ -22,7 +22,11 @@ caller (gateway/bridge) --POST /ask--> [answer-endpoint] --spawn--> claude -p (f
   peer-facing daemon (SPEC §6.2).
 - `pending_actions.py` — the durable pending-actions ledger (propose in one spawn, approve +
   execute in a later one).
-- `redaction.py` — peer-path output redaction + inbound secret-seeking tripwire.
+- `redaction.py` — peer-path output redaction + inbound secret-seeking tripwire. Redaction
+  catches secret *material*; the answerer's context/prompt must also implement SPEC §6.4
+  (risky-question evaluation: account-recovery recon, verification bait, posture probes,
+  authority/urgency framing) — the questions whose harm is in the facts a correct-looking
+  answer would disclose or confirm.
 - `empty-mcp.json` — empty MCP config used by `STRICT_MCP`.
 - `test_machine_lane.py`, `test_escalation.py` — unit tests (fake `claude`, no model calls).
 

@@ -457,13 +457,13 @@ def _machine_answer(msg):
             env["error"] = (f"unknown gpu_id {want!r}; valid ids: "
                             f"{[g.get('id') for g in gpus]}")
         return _envelope(env)
-    if kind == "balance":
+    if kind in ("balance", "reservation_status"):
         sender = re.sub(r"[^a-z0-9-]", "", str(msg.get("from", "")).lower())
         if not sender:
             return None
-        acct = CALDERA_CTX / f"account-{sender}.json"
+        acct_path = CALDERA_CTX / f"account-{sender}.json"
         try:
-            return _envelope(json.loads(acct.read_text()))
+            acct = json.loads(acct_path.read_text())
         except (OSError, json.JSONDecodeError):
             # G-2: no Caldera account is LINKED to this koine identity. The koine edge and the
             # Caldera renter account are separate identity planes — a peered agent isn't
@@ -487,8 +487,33 @@ def _machine_answer(msg):
                     "renter token — not over this Koine edge.",
                 ],
                 "coordination_here": "This Koine caldera/v1 lane serves catalog / availability "
-                                     "/ balance (once linked) and notifications — not reserve.",
+                                     "/ balance / reservation_status (once linked) and "
+                                     "notifications — not reserve.",
             })
+        if kind == "balance":
+            return _envelope(acct)
+        # reservation_status: authoritative "is it reserved or not" for the ASKING agent,
+        # served from the seller-published account context. Exists because a renter once
+        # modeled a rejected propose as still-pending — silence must never look like a
+        # reservation. Looks up by request_id/reservation_id, or lists everything on file.
+        rid = str(body.get("request_id") or body.get("reservation_id") or "").strip()
+        pool = list(acct.get("open_reservations") or []) + \
+            list(acct.get("recent_closed") or [])
+        matches = [r for r in pool
+                   if not rid or rid in (r.get("request_id"), r.get("id"))]
+        env = {"coord": "caldera/v1", "kind": "reservation_status_report",
+               "as_of": acct.get("as_of"), "agent": sender,
+               "query": rid or None, "matches": matches,
+               "note": ("status 'rejected' is FINAL for that request_id — nothing is queued "
+                        "or pending approval; re-propose with a fresh request_id if desired. "
+                        "Only a reserve_confirm (or a 'confirmed'/'held' status here) means "
+                        "a window is armed.")}
+        if rid and not matches:
+            env["note"] = ("No reservation with that request_id/reservation_id is on file "
+                           "for your account (open or recently closed). If your "
+                           "reserve_propose never got a reserve_confirm, NOTHING is "
+                           "reserved — treat it as closed and re-propose.")
+        return _envelope(env)
     return None
 
 

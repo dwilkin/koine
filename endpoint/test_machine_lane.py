@@ -29,7 +29,13 @@ PUBLIC = {
               "warmth": {"m1": {"state": "cold"}}, "models": []}],
 }
 ACCOUNT = {"coord": "caldera/v1", "agent": "cid", "balance_usd": -5.0,
-           "owed_usd": 0.0, "credit_usd": 5.0}
+           "owed_usd": 0.0, "credit_usd": 5.0,
+           "as_of": "2026-07-21T00:00:00Z",
+           "open_reservations": [
+               {"id": "res-1", "request_id": "req-open", "status": "confirmed"}],
+           "recent_closed": [
+               {"id": "res-0", "request_id": "req-rej", "status": "rejected",
+                "reject_reason": "max_hours_per_day"}]}
 
 
 def _msg(body, mtype="question", sender="cid", channel=""):
@@ -84,6 +90,29 @@ class MachineLaneTest(unittest.TestCase):
                               sender="../../etc/passwd"))
         self.assertEqual(got["kind"], "no_account")
         self.assertEqual(got["agent"], "etcpasswd")   # sanitized — no traversal
+
+    def test_reservation_status_by_request_id(self):
+        # a REJECTED propose stays visible + is declared final — silence must never
+        # look like a reservation
+        got = self._body(_msg({"coord": "caldera/v1", "kind": "reservation_status",
+                               "request_id": "req-rej"}))
+        self.assertEqual(got["kind"], "reservation_status_report")
+        self.assertEqual(len(got["matches"]), 1)
+        self.assertEqual(got["matches"][0]["status"], "rejected")
+        self.assertIn("FINAL", got["note"])
+        # unknown id -> explicit "nothing is reserved", not silence
+        got = self._body(_msg({"coord": "caldera/v1", "kind": "reservation_status",
+                               "request_id": "req-ghost"}))
+        self.assertEqual(got["matches"], [])
+        self.assertIn("NOTHING is reserved", got["note"])
+        # no id -> lists open + recently closed
+        got = self._body(_msg({"coord": "caldera/v1", "kind": "reservation_status"}))
+        self.assertEqual({m["request_id"] for m in got["matches"]},
+                         {"req-open", "req-rej"})
+        # unlinked identity -> same deterministic onboarding guidance as balance
+        got = self._body(_msg({"coord": "caldera/v1", "kind": "reservation_status"},
+                              sender="mallory"))
+        self.assertEqual(got["kind"], "no_account")
 
     def test_notification_gets_pipeline_ack(self):
         got = self._body(_msg({"coord": "caldera/v1", "kind": "usage_report"},
