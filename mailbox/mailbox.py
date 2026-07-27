@@ -475,6 +475,11 @@ class PublicHandler(BaseH):
             # peer -> us: only the granted peer, then independent grant enforcement + dedup.
             if str(msg.get("from", "")).strip() != PEER_AGENT:
                 return self._send(403, {"error": f"only '{PEER_AGENT}' may ask on this edge"})
+            # Same pre-gate stamp as the relay paths: an inbound message with no thread_id must
+            # get its own thread, not join the shared "" bucket that would 429 every such
+            # message once thread_depth of them accumulated.
+            msg.setdefault("id", os.urandom(6).hex())
+            msg.setdefault("thread_id", msg["id"])
             gate = _grant_gate(msg, {"types": GRANT_TYPES, "max_per_day": GRANT_MAX_PER_DAY,
                                      "thread_depth": GRANT_THREAD_DEPTH, "expires": GRANT_EXPIRES},
                                 sender=PEER_AGENT, edge=_edge_key(PEER_AGENT, LOCAL_AGENT))
@@ -595,15 +600,15 @@ class RelayHandler(BaseH):
                              reason="no edge")
                 return self._send(403, {"ok": False,
                                         "body": f"no registered edge {frm}<->{to}"})
+            msg.setdefault("id", os.urandom(6).hex())   # pre-gate — see the /ask note above
+            msg.setdefault("thread_id", msg["id"])
             gate = _grant_gate(msg, grant, sender=frm, edge=_edge_key(frm, to))
             if gate:
                 code, reason = gate
                 _audit_write("node_forward_refused", frm=frm, to=to, id=msg.get("id"),
                              type=msg.get("type"), code=code, reason=reason)
                 return self._send(code, {"ok": False, "body": reason})
-            msg.setdefault("id", os.urandom(6).hex())
-            msg.setdefault("thread_id", msg["id"])
-            msg.setdefault("ts", _now())
+            msg.setdefault("ts", _now())      # id/thread_id already stamped pre-gate
             mtype = str(msg.get("type", "question"))
             if mtype != "notification" and not _relay_sem.acquire(blocking=False):
                 return self._send(429, {"ok": False, "body": "relay busy (max in-flight)"})
@@ -644,6 +649,13 @@ class RelayHandler(BaseH):
                 _audit_write("ask_refused", frm=me, to=to, code=403, reason="no edge")
                 return self._send(403, {"ok": False,
                                         "body": f"no registered edge {me}<->{to}"})
+            # Stamp id/thread_id BEFORE the gate reads them. These setdefaults used to run
+            # AFTER, so a client that omitted thread_id was gated on tid="" — every such message
+            # from EVERY edge shared one bucket, and the 6th permanently 429'd them all with
+            # "thread-depth cap reached". Dedup was dead on those too (a blank id skips the
+            # replay check). Found in the wild 2026-07-27 sending poseidon->mitchy.
+            msg.setdefault("id", os.urandom(6).hex())
+            msg.setdefault("thread_id", msg["id"])
             gate = _grant_gate(msg, grant, sender=me, edge=_edge_key(me, to))
             if gate:
                 code, reason = gate
@@ -652,9 +664,7 @@ class RelayHandler(BaseH):
                 return self._send(code, {"ok": False, "body": reason})
             msg["from"] = me                  # token-derived, never body-claimed
             msg["to"] = to
-            msg.setdefault("id", os.urandom(6).hex())
-            msg.setdefault("thread_id", msg["id"])
-            msg.setdefault("ts", _now())
+            msg.setdefault("ts", _now())      # id/thread_id already stamped pre-gate
             mtype = str(msg.get("type", "question"))
             # KO-L2: a blocking question ties up a worker thread up to REPLY_TIMEOUT; cap the
             # number in flight so a burst can't exhaust threads/memory. Acquire BEFORE enqueue
