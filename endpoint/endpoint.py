@@ -510,9 +510,13 @@ def _machine_answer(msg):
                         "a window is armed.")}
         if rid and not matches:
             env["note"] = ("No reservation with that request_id/reservation_id is on file "
-                           "for your account (open or recently closed). If your "
-                           "reserve_propose never got a reserve_confirm, NOTHING is "
-                           "reserved — treat it as closed and re-propose.")
+                           "for your account (open or recently closed), so NOTHING is "
+                           "reserved for it. Two cases look identical here: (a) the propose "
+                           "was never sent/received, or (b) it was rejected as malformed "
+                           "(reserve_reject reason 'invalid') — a malformed propose is NOT "
+                           "stored, so it can't appear here. If you received a reserve_reject "
+                           "for this request_id, read its 'detail' field for the fix, then "
+                           "re-propose with a fresh request_id.")
         return _envelope(env)
     return None
 
