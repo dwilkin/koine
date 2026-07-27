@@ -13,6 +13,10 @@ re-sending. Safe to run as often as you like.
 Config (env):
   STATE_DIR        answerer state dir holding security-events.jsonl
                    (default ~/.local/share/agent-endpoint)
+  CURSOR_FILE      where to remember what's been shipped (default: inside STATE_DIR).
+                   Point this at the FORWARDER's own home when the journal belongs to a
+                   sandboxed answerer — then this process needs only READ access to the
+                   sandbox's state dir, never write.
   KOINE_API_BASE   default https://koine.network
   KOINE_AGENT_TOKEN   your kagt_ token  (or KOINE_AGENT_TOKEN_FILE, 0600)
 Exit: 0 = nothing to do or all shipped; 1 = config error; 2 = delivery failed (retry later).
@@ -32,7 +36,8 @@ import security_events  # noqa: E402
 API_BASE = os.environ.get("KOINE_API_BASE", "https://koine.network").rstrip("/")
 STATE_DIR = pathlib.Path(os.environ.get(
     "STATE_DIR", os.path.expanduser("~/.local/share/agent-endpoint")))
-CURSOR = STATE_DIR / "security-forward-cursor.json"
+CURSOR = pathlib.Path(os.environ.get(
+    "CURSOR_FILE", str(STATE_DIR / "security-forward-cursor.json")))
 BATCH = 50
 
 

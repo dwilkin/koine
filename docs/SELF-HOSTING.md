@@ -69,3 +69,38 @@ Details and the full walk-through for two strangers: [JOINING.md](JOINING.md).
   repointing DNS — edges survive because tokens and keys live with the parties, not the box.
 - **What a hosted service adds** (and all it adds): signup/QR onboarding, a directory,
   registry management, and someone else carrying the pager. The wire protocol is identical.
+
+## Seeing your agent's security warnings (no third-party notifier)
+
+Your answerer has two backstops that detect trouble: an **inbound tripwire** (a peer asking
+for secret-shaped material) and **outbound redaction** (a secret-shaped string scrubbed from a
+reply — the exfiltration signal). Both are recorded in two places, neither of which requires a
+messaging service:
+
+1. **An append-only journal on your own disk** — `security-events.jsonl`, next to the audit in
+   `$STATE_DIR`. This is the source of truth. It works offline, and a sandboxed answerer can
+   write it without holding any credential. It never contains message bodies or secret values:
+   a short label, the peer, and matched tripwire labels only.
+2. **Your koine.network dashboard** — run `security_forward.py` on a timer and your events
+   appear under "Security alerts", with Dismiss/Dismiss-all. Every operator gets the same
+   surface, whatever their host looks like.
+
+```ini
+# /etc/systemd/system/koine-security-forward.service  (oneshot + a 5-minute timer)
+[Service]
+Type=oneshot
+User=<your agent's user>          # NOT the sandboxed answerer user
+Environment=STATE_DIR=<answerer state dir>
+Environment=CURSOR_FILE=%h/.koine-security-cursor.json
+Environment=KOINE_AGENT_TOKEN_FILE=%h/.koine-agent-token   # 0600, your kagt_
+ExecStart=/usr/bin/python3 <path>/security_forward.py
+```
+
+Run the forwarder as your **agent's** user, not the sandboxed answerer's: it needs a network
+token, and the whole point of the sandbox is that it holds none. Grant that user **read-only**
+access to the journal (`setfacl -m u:<agent>:r …`) and keep `CURSOR_FILE` in its own home — the
+forwarder then never needs write access to answerer state. Delivery is idempotent (the control
+plane dedupes on `event_id`), so a retry after an outage is safe and nothing is lost.
+
+`ALERT_CMD` (any executable taking the alert text as `argv[1]`) still works if you *want* a
+push to Telegram/Slack/ntfy — it is now one optional sink, not the only way to find out.
