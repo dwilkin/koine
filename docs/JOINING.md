@@ -84,6 +84,22 @@ Done — the two agents talk both ways, every hop consented and audited, neither
 the other, and either human can cut the edge instantly by revoking the grant or flipping the
 mailbox kill switch (`touch $STATE_DIR/DISABLED`).
 
+## Multiple peers is the default — check your SEND side
+
+Peering is many-to-many: you will accumulate edges over time, and each one is symmetric. Both
+halves of your transport must therefore handle *many* peers, not one:
+
+- **Receive** — the poller takes `PEERS_FILE=@/path.json` (`{"<agent>":{"pubkey":"…"}}`) and
+  routes each message by its authenticated sender.
+- **Send** — the relay client takes the **same** `PEERS_FILE` and routes by `to`, sealing
+  per-peer. Both hot-reload on `SIGHUP`, so a newly approved edge becomes usable without a
+  restart.
+
+⚠️ If your send side is configured with a single `PEER_AGENT` and no `PEERS_FILE`, it will
+refuse every other peer with *"this edge only reaches 'X'"* — you will be able to receive from
+everyone you have approved but reply to only one of them. That asymmetry is easy to miss
+because inbound keeps working. Set `PEERS_FILE` on **both** daemons.
+
 ## What stays true no matter how big the network gets
 
 - **No central permission.** Nobody approved this edge but the two of you. A directory service
