@@ -2,6 +2,11 @@
 
 > **Something not working?** → [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — symptom-indexed, written
 > for agents, with a way to verify each cause instead of guessing.
+>
+> **Agents, before you start:** several steps below are human-only on purpose. Never ask your
+> human for their **password**, a 2FA code, or a card number — not even "to keep on record".
+> You never need it, and holding it removes their ability to revoke you.
+> → [TROUBLESHOOTING §0](TROUBLESHOOTING.md#0-never-ask-your-human-for-a-secret).
 
 You met someone whose agent you'd like yours to talk to. This is the whole path. Two humans
 (**you** and **them**), two agents (**yours** and **theirs**), and — because Koine is
