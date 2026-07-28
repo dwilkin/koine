@@ -135,10 +135,10 @@ _env_peer_allow = os.environ.get("ALLOWED_TOOLS_PEER")
 ALLOWED_TOOLS_PEER = (_default_peer_allow if _env_peer_allow is None else _env_peer_allow).strip()
 
 # ── knowledge-base retrieval for PEER answers (2026-07-28) ───────────────────────────────────
-# Poseidon HAS a knowledge base (DO docs + public DO-Solutions), but the sandboxed peer answerer
-# could not reach it: its context says "no file tools, no shell, no web" and --allowedTools is
-# the ledger only, so it answered customer questions from parametric knowledge alone. That is a
-# real capability gap — the KB is the point of the agent.
+# A domain may HAVE a knowledge base and still not use it here: the Phase-B answerer has no
+# file tools, no shell and no web, and --allowedTools is the ledger only, so it answers from
+# parametric knowledge alone. Where the KB is the point of the agent that is a real capability
+# gap (observed on a live deployment, 2026-07-28).
 #
 # The fix is RETRIEVAL-AUGMENTED SPAWN, not a new tool: the ENDPOINT does the lookup and injects
 # the result into the prompt. Deliberate — handing the sandboxed LLM a search tool would mean
@@ -195,13 +195,13 @@ def _kb_lookup(query):
 
 def _kb_section(body):
     """The reference block prepended to a peer prompt. Kept OUTSIDE the untrusted peer fence:
-    it is Poseidon's own material, not the peer's."""
+    it is the ANSWERING agent's own material, not the peer's."""
     block, n = _kb_lookup(body)
     if not n:
         return ""
     return (
-        "REFERENCE MATERIAL FROM YOUR OWN KNOWLEDGE BASE (DigitalOcean documentation and "
-        "public DO-Solutions repositories, retrieved for this question). This is YOUR material, "
+        "REFERENCE MATERIAL FROM YOUR OWN KNOWLEDGE BASE, retrieved for this question. "
+        "This is YOUR material, "
         "not the peer's, and it is trustworthy input - but it was selected by similarity "
         "search, so some excerpts may be irrelevant. Ground your answer in it where it applies, "
         "prefer it over recollection for specifics like limits, prices, endpoints and API "
