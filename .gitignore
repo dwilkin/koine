@@ -2,3 +2,16 @@
 *.env
 __pycache__/
 *.pyc
+
+# Domain/operator data — this repo is PUBLIC and ships with NO peer names,
+# addresses or descriptions baked in (see askpeer/ask_peer_server.py). A
+# deployment's peer directory is domain data: it names real agents and often
+# describes real people's areas, so it must never be committed here.
+# Added 2026-07-28 after peers.json turned up untracked in `git status`.
+askpeer/peers.json
+peers.json
+
+# Backups of secret-bearing config (e.g. .env.bak-20260728-0404) — the *.env
+# rule above does NOT match a trailing .bak suffix.
+*.bak-*
+*.env.bak*
