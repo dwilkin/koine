@@ -506,6 +506,73 @@ def _telegram(recipient_agent, text):
     return status
 
 
+# Human-facing brief (2026-07-28): operators asked for Telegram pushes that are readable at a
+# glance. The push gets a compact, scannable rendering; the FULL text still goes to the bridge
+# note + the audit, so nothing is lost.
+_TG_BODY_MAX = 1200
+_TG_REPLY_MAX = 320
+
+
+def _coord_envelope(body):
+    """Parsed coord envelope if the body is one (machine lane JSON), else None."""
+    s = (body or "").strip()
+    if not (s.startswith("{") and '"coord"' in s):
+        return None
+    try:
+        d = json.loads(s)
+    except Exception:
+        return None
+    return d if isinstance(d, dict) and d.get("coord") else None
+
+
+def _squash(text, limit):
+    """Collapse runs of blank lines and clip to `limit` with an explicit truncation marker."""
+    out, blank = [], False
+    for raw in (text or "").splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            if blank or not out:
+                continue
+            blank = True
+            out.append("")
+        else:
+            blank = False
+            out.append(line)
+    s = "\n".join(out).strip()
+    if len(s) > limit:
+        s = s[:limit].rsplit(" ", 1)[0] + f"\n… (+{len(s) - limit} chars — ask me for the rest)"
+    return s
+
+
+def _human_brief(kind_label, sender, target, body, reply, thread_id):
+    """One glanceable Telegram message: who/what header, subject line, trimmed body, reply gist."""
+    lines = [f"🔔 {sender} · {kind_label}"]
+    env = _coord_envelope(body)
+    if env:
+        head = [str(env.get("coord", "")), str(env.get("kind", ""))]
+        if env.get("request_id"):
+            head.append(f"req {env['request_id']}")
+        lines.append(" · ".join(p for p in head if p))
+        extras = ", ".join(f"{k}={v}" for k, v in env.items()
+                           if k not in ("coord", "kind", "request_id"))
+        if extras:
+            lines.append(_squash(extras, 400))
+    else:
+        text = (body or "").strip()
+        first, _, rest = text.partition("\n")
+        first = first.strip()
+        lines.append(first[:150] + ("…" if len(first) > 150 else "") or "(no body)")
+        rest = _squash(rest, _TG_BODY_MAX)
+        if rest:
+            lines += ["", rest]
+    if reply:
+        gist = " ".join(str(reply).split())
+        lines += ["", f"↩ {target}: {gist[:_TG_REPLY_MAX]}"
+                      f"{'…' if len(gist) > _TG_REPLY_MAX else ''}"]
+    lines.append(f"· thread {str(thread_id)[:8]}")
+    return "\n".join(lines)
+
+
 def _bridge_note(agent, text):
     """Best-effort: record a proactive send in the telegram-bridge's rolling history so the
     human's reply spawns an answerer that knows what it was replying to. Never blocks."""
@@ -824,7 +891,9 @@ class Handler(BaseHTTPRequestHandler):
         notify = "n/a"
         notify_note = "n/a"
         if mtype in NOTIFY_TYPES:
-            notify = _telegram(target, f"[A2A] {sender} -> {target} ({mtype}):\n{msg.get('body','')}")
+            notify = _telegram(target, _human_brief(
+                mtype.replace("_", " "), sender, target, msg.get("body", ""), None,
+                msg["thread_id"]))
             if notify == "sent":
                 notify_note = _bridge_note(
                     target, f"[A2A {mtype} from {sender}]\n{msg.get('body','')[:6000]}")
@@ -850,12 +919,16 @@ class Handler(BaseHTTPRequestHandler):
         # Approval-shaped reply => Telegram the recipient's human (see APPROVAL_RE above).
         # Deliberately ignores quiet hours / notify caps, same as NOTIFY_TYPES: an approval
         # request left silent is the failure mode this exists to kill.
-        if ok and mtype not in NOTIFY_TYPES and APPROVAL_RE.search(reply or ""):
-            meta["approval_notify"] = _telegram(
-                target,
-                f"[A2A needs-approval] {sender} → {target} (thread {msg['thread_id']}):\n"
-                f"ASK: {str(msg.get('body', ''))[:3000]}\n—\n"
-                f"ANSWERER: {(reply or '')[:3000]}")
+        # Machine-lane answers (deterministic, no LLM, built from published state) can *phrase*
+        # a status as "pending approval" without there being anything for the human to approve —
+        # that false positive was firing a Telegram push per polling read (2026-07-28). Skip it.
+        machine_lane = bool((meta.get("peer_meta") or {}).get("machine_lane"))
+        if ok and mtype not in NOTIFY_TYPES and machine_lane and APPROVAL_RE.search(reply or ""):
+            meta["approval_notify"] = "skipped-machine-lane"
+        elif ok and mtype not in NOTIFY_TYPES and APPROVAL_RE.search(reply or ""):
+            meta["approval_notify"] = _telegram(target, _human_brief(
+                "needs your approval", sender, target, msg.get("body", ""), reply,
+                msg["thread_id"]))
             if meta["approval_notify"] == "sent":
                 _bridge_note(target,
                              f"[A2A needs-approval from {sender}, thread {msg['thread_id']}]\n"
