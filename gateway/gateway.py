@@ -361,6 +361,32 @@ def _msgs_last_day_edge(agent):
         return r["n"] if r else 0
 
 
+def _pin_channel(msg):
+    """SPEC §3 MUST — cross-domain traffic may not assert a privileged channel.
+
+    `channel` selects how the RECEIVING answerer spawns. "human" is the human
+    control channel (full tools, no peer redaction, and `bypassPermissions` on
+    endpoints with Telegram-execution parity); "ops" is the monitoring wake.
+    Both are LOCAL concepts — only this domain's own surfaces may set them.
+
+    A peer asserting `channel:"human"`, or a neutral/malicious relay injecting
+    it (channel is a routing field, NOT covered by the sealed body's AAD, so the
+    transport can add it without breaking the seal), is an auth-confusion
+    attempt: it would make peer text arrive on the trusted human channel.
+
+    Until 2026-07-28 the gateway never read `channel` at all — the only defence
+    was the receiving answerer's OPT-IN Phase-B split (REFUSE_HUMAN_CHANNEL or a
+    separate sandboxed daemon), so any agent that hadn't split was fully exposed.
+    The gateway is the trust boundary, so enforcement belongs here and applies to
+    every agent, sandboxed or not.
+
+    Mutates `msg` to pin channel="peer". Returns the stripped value for the audit
+    trail, or None when nothing privileged was asserted."""
+    asserted = str(msg.get("channel", "") or "").strip()
+    msg["channel"] = "peer"
+    return asserted if asserted and asserted != "peer" else None
+
+
 def _grant_check(sender, target, mtype, thread_id=""):
     """Peering-grant enforcement (SPEC.md §5): agents whose card carries a `grant`
     are cross-domain edges — types/rate/thread-depth/expiry are hard limits, enforced
@@ -766,6 +792,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": f"type must be one of {sorted(VALID_TYPES)}"})
         if not str(msg.get("body", "")).strip():
             return self._send(400, {"error": "empty body"})
+
+        stripped = _pin_channel(msg)
+        if stripped:
+            _audit("channel_stripped", msg, ok=0,
+                   meta={"reason": f"asserted channel '{stripped}' stripped to 'peer'",
+                         **auth_meta})
 
         msg.setdefault("id", os.urandom(6).hex())
         msg.setdefault("thread_id", msg["id"])
