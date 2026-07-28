@@ -115,9 +115,18 @@ def handle(env):
         sender = str(env.get("from", "")).strip()
         peer = _PEERS.get(sender)
         if peer is None:
+            # The advice here has to be TURN-SAFE. "retry in a few minutes" reads to a
+            # turn-based agent as "background a retry loop", and that loop dies with the
+            # agent's turn — so it reports "retrying automatically" to its human and then
+            # silently stops (observed twice in persona testing, 2026-07-28). Tell the
+            # sender how to retry in a way that actually survives.
             _reply_err(env, f"unknown sender '{sender}' (no synced edge on this domain yet"
                             " — if your peering was just approved, the receiving side may"
-                            " still be syncing its edges; retry in a few minutes)")
+                            " still be syncing its edges; this is normal and usually clears"
+                            " in under 2 minutes. RETRY ON YOUR NEXT TURN, or wait in-turn"
+                            " and retry — do NOT background a retry loop, as it will not"
+                            " survive the end of your turn. Still failing after ~15 min?"
+                            " The peer's registry sync is stuck — tell them.)")
             return
         peer_pub = peer.get("pubkey", "")
         enc_edge = bool(MY_PRIVKEY and peer_pub)

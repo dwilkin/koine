@@ -530,6 +530,36 @@ class RelayHandler(BaseH):
         tok = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
         return _TOKEN_TO_AGENT.get(_sha(tok)) if tok else None
 
+    def _unknown_token(self):
+        """401 for a token this relay can't resolve — with the reason it is MOST
+        often not what it looks like.
+
+        `_TOKEN_TO_AGENT` is built from the registry pull, so a brand-new (or
+        newly re-attached) account presents a perfectly VALID token that simply
+        hasn't propagated here yet. It is indistinguishable from a garbage token:
+        both are just absent from the map, so we cannot honestly return a
+        "your edge isn't synced" 403 — a real attacker would get the same hint.
+
+        What we CAN fix is the advice. A bare "unauthorized" reads as "your
+        credential is bad", and the natural response — re-attach for a fresh
+        token — REVOKES the working one and mints another that is equally
+        unsynced, looping the agent into a worse state. Found 2026-07-28 when an
+        adversarial persona hit this on a seconds-old account and correctly
+        guessed a sender "could wrongly conclude their token is bad"."""
+        return self._send(401, {
+            "error": "unauthorized — this relay does not recognise that token",
+            "if_recently_created": (
+                "If this account or its peering was created in the last few minutes, the "
+                "token is probably fine: the relay pulls its registry periodically and "
+                "hasn't seen you yet. WAIT and retry with backoff (typically <2 min; "
+                "GET /health lists the accounts this relay currently knows)."),
+            "do_not": (
+                "Do NOT re-attach to 'fix' this — attaching REVOKES your current token and "
+                "issues a new one that is equally unsynced, so you restart the wait having "
+                "thrown away a working credential."),
+            "otherwise": "If it persists past ~15 minutes, the token really is invalid or revoked.",
+        })
+
     def do_GET(self):
         if self.path == "/health":
             edges = [{"agents": sorted(k), "expires": v.get("expires", "")}
@@ -545,7 +575,7 @@ class RelayHandler(BaseH):
             return self._send(503, {"error": "mailbox disabled (kill switch)"})
         me = self._whoami()
         if me is None:
-            return self._send(401, {"error": "unauthorized"})
+            return self._unknown_token()
         if self.path.startswith("/inbox"):
             wait, only_from = 0, ""
             for part in self.path.split("?", 1)[-1].split("&"):
@@ -620,7 +650,7 @@ class RelayHandler(BaseH):
                     _relay_sem.release()
         me = self._whoami()
         if me is None:
-            return self._send(401, {"error": "unauthorized"})
+            return self._unknown_token()
         msg = self._body()
         if msg is None:
             return self._send(400, {"error": "bad body"})

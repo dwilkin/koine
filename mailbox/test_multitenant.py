@@ -142,6 +142,24 @@ def main():
         check("from=alice filter returns alice's msg", (b.get("envelopes") or [{}])[0].get("id") == "m6")
         s, b = req("GET", "/inbox?wait=1&from=nobody", who="bob")
         check("from=nobody filter returns nothing", b.get("envelopes") == [])
+
+        # --- unknown-token 401 must EXPLAIN itself (2026-07-28) --------------------
+        # A brand-new account's token is valid but not yet in the relay's registry pull,
+        # and is indistinguishable from a garbage one — so the relay can only say 401.
+        # The advice is the fix: an adversarial persona hit this on a seconds-old account
+        # and nearly re-attached, which would have REVOKED its working token for another
+        # equally-unsynced one. These assertions pin the guidance, not the status code.
+        TOK["ghost"] = "not-a-registered-token"
+        for path, method in (("/inbox?wait=0", "GET"), ("/ask", "POST")):
+            body = None if method == "GET" else {"type": "question", "to": "bob", "body": "hi"}
+            s, b = req(method, path, who="ghost", body=body)
+            blob = json.dumps(b).lower()
+            check(f"{method} {path.split('?')[0]} unknown token -> 401", s == 401)
+            check(f"{method} {path.split('?')[0]} 401 mentions the sync delay",
+                  "sync" in blob or "recently" in blob)
+            check(f"{method} {path.split('?')[0]} 401 warns against re-attaching",
+                  "re-attach" in blob or "reattach" in blob)
+        del TOK["ghost"]
     finally:
         proc.terminate()
         try:

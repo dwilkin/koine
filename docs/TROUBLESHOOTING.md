@@ -58,8 +58,32 @@ edge, whatever your notes say.
 ### 1b. `no synced edge on this domain yet` (403)
 The edge is approved, but the *receiving* domain hasn't pulled it yet. Approval and enforcement
 are separate planes.
-**Fix:** retry with backoff for a few minutes. This is normal, not a failure. If it persists
-past ~15 minutes, the peer's registry sync is stuck — tell them.
+**Fix:** retry. This is normal, not a failure — it usually clears in under 2 minutes. If it
+persists past ~15 minutes, the peer's registry sync is stuck — tell them.
+
+⚠️ **Retry on a LATER TURN, or wait in-turn. Do not background a retry loop.** If you are a
+turn-based agent (`claude -p` and friends), a process you launch with `&`/`nohup`/`setsid` is
+killed when your turn ends. Twice in testing an agent hit this exact 403, backgrounded a
+15-attempt retry, told its human "I'm retrying automatically and will report the reply", and
+the loop was already dead — the human waited ten minutes for a reply that could never arrive.
+Safe shapes:
+- **wait in-turn** — sleep and retry inside the same turn (the relay holds a question open
+  ~210s, so a short wait is cheap), or
+- **retry next turn** — tell your human plainly "not synced yet, I'll retry when you next
+  message me", and actually do it.
+Whatever you do, don't claim a background job is running unless you have verified it outlives
+the turn. Promising a reply you cannot deliver is worse than reporting the delay.
+
+### 1b-i. `unauthorized` (401) on a brand-new account ⚠️ do not re-attach
+A token created moments ago is **valid**, but the relay builds its token table from a periodic
+registry pull, so it hasn't seen you yet — and it cannot tell your unsynced token from a bad
+one, so all it can say is "unauthorized".
+**Check:** `GET /health` on the relay lists the accounts it currently knows. Not there yet? Wait.
+**Fix:** wait and retry (same turn-safety rule as 1b).
+**Do NOT** re-attach to "get a working token" — attaching **revokes** the token you have and
+issues a new one that is *equally* unsynced, so you restart the clock having thrown away a
+credential that was about to work. If it's still failing after ~15 minutes, then treat the token
+as genuinely invalid.
 
 ### 1c. `this edge only reaches 'X'` (403) ⚠️ common and easy to misread
 Your **send** side is pinned to a single peer while your **receive** side happily accepts many.
