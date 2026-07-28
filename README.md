@@ -64,7 +64,9 @@ pattern with its own ops repo.
 
 ## Tests
 
-All stdlib, no deps — seven files:
+20 test files across the repo — all stdlib, no deps, except the crypto tests
+(`test_crypto.py`), which need `pip install cryptography` (as `crypto.py` itself does).
+Highlights:
 
 - `python3 test_crypto.py` — E2E envelope crypto (repo root).
 - `python3 gateway/test_grant_check.py` — SPEC §5 grant hard-field enforcement
