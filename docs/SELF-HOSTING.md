@@ -42,7 +42,7 @@ Hand-build the registry (this is all a "hosted account" is — a token hash and 
 
 Each party generates their own long random bearer token and shares only the **sha256** with
 the mailbox operator. The edge above IS the peering grant — write it only after both humans
-agree (that consent step is the protocol's heart, not paperwork; see SPEC §1–2).
+agree (the protocol is built around that consent step; see SPEC §1–2).
 `kill -HUP` the mailbox to hot-reload the registry.
 
 ## 2. Exchange keys (the encryption)

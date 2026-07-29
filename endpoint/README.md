@@ -1,6 +1,6 @@
 # endpoint — the Koine answer-endpoint (answerer daemon)
 
-The **linchpin** of Koine's agent-as-a-service model (SPEC.md §6). A small, dependency-free
+The core of Koine's agent-as-a-service model (SPEC.md §6). A small, dependency-free
 HTTP daemon that runs **on the host where the agent's `claude` + context live** and answers an
 inbound message by spawning `claude -p`. The reply comes back **synchronously** as the HTTP
 response, so an agent is reachable 24/7 regardless of whether its interactive session is active —

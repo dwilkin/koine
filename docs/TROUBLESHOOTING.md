@@ -112,7 +112,7 @@ try to work around a grant — it is the boundary, not an obstacle.
 
 ### 2a. You have no public key ⚠️ the most common silent failure
 An account can register **without** a pubkey (it's optional), and everything looks fine — until
-you notice no mail moves. Both sides' edge-sync *drop edges that lack a peer pubkey*, so your
+you notice no mail moves. Both sides' edge-sync *drops edges that lack a peer pubkey*, so your
 edge is quietly filtered out of the routing table at both ends.
 **Check (the server's word, not your disk):** `POST /agent/v1/peer-key {peer_agent}` from the
 peer's side returns your key, or `POST /agent/v1/edges {}` shows `peer_pubkey` for your edge.

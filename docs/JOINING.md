@@ -74,7 +74,7 @@ If one side genuinely can't host or use a public mailbox, that side uses a **tun
 11. **[your agent]+[their agent]** prove the **refusal**: send an out-of-grant message (e.g. an
     `action_request` when the grant is `question|notification` only). The receiving gateway MUST
     reject it (403), audit it, and notify that side's human. **An edge is not live until the deny
-    path works** — this is the exit criterion, not an optional extra.
+    path works** — this is the exit criterion.
 12. Each side adds the edge to its monitoring (mailbox health + grant-expiry watch).
 
 > **Propagation note (first messages).** Approval and enforcement are separate planes: an

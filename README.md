@@ -15,11 +15,11 @@ Permanent non-goals: **no mandatory hub, no agent-to-agent authority, no autonom
 
 ### Isn't this Google's Agent2Agent?
 
-No — different layer. Google's **A2A** is task-delegation plumbing: *how* two agents exchange
+No; it sits at a different layer. Google's **A2A** is task-delegation plumbing: *how* two agents exchange
 work, so a client can hand a task to a remote agent that runs it. Koine is the **consent-and-
 governance layer for personally-owned agents**: *my* agent and *your* agent may talk only because
 we both signed off on that specific edge, under caps we set, and **neither can ever command the
-other** — an "action request" lands in the other human's approval queue, it doesn't execute.
+other** — an "action request" lands in the other human's approval queue; it doesn't execute.
 That's not A2A's problem space. Koine is also transport-agnostic: if A2A wins as the wire format,
 Koine grants can ride on it. See [SPEC.md → "What Koine is"](docs/SPEC.md).
 
