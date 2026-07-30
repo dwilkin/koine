@@ -14,6 +14,7 @@ import tempfile
 os.environ.setdefault("AUTH_TOKEN", "test")
 os.environ.setdefault("MACHINE_LANE", "1")
 os.environ.setdefault("WORKDIR", tempfile.mkdtemp(prefix="acktest-"))
+os.environ.setdefault("STATE_DIR", tempfile.mkdtemp(prefix="acktest-state-"))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("endpoint", os.path.join(HERE, "endpoint.py"))
@@ -44,6 +45,17 @@ def main():
         ck("ack echoes id + thread", d["id"] == "m1" and d["thread_id"] == "t1")
         ck("ack meta is machine lane / $0",
            r[1]["machine_lane"] is True and r[1]["cost_usd"] == 0.0)
+
+    # the ack journals a human-visible event — metadata only, never the E2E body
+    # (2026-07-30: a stranger's delete-my-account notification was acked into a void)
+    jpath = os.path.join(os.environ["STATE_DIR"], "security-events.jsonl")
+    events = [json.loads(x) for x in open(jpath)] if os.path.exists(jpath) else []
+    pn = [e for e in events if e.get("kind") == "peer-notification"]
+    ck("ack journals a peer-notification event", len(pn) == 1)
+    if pn:
+        ck("event names the peer", pn[0].get("peer") == "stranger")
+        ck("event carries NO message body",
+           "deployed the thing" not in json.dumps(pn[0]))
 
     # JSON-but-uncoordinated notification -> still acked
     r = ep._machine_answer(_msg("notification", json.dumps({"note": "hello"})))

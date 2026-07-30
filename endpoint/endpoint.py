@@ -507,11 +507,23 @@ def _machine_answer(msg):
     # notifications fall through: their lanes carry lane-specific acks.
     if (str(msg.get("type", "")) == "notification"
             and not (isinstance(body, dict) and body.get("coord"))):
+        # Surface it to a human (2026-07-30): a persona test sent this agent a
+        # please-delete-my-account notification and the ack was the last anyone heard of it —
+        # machine-acked into a void. Journal a METADATA-ONLY event (peer, id, size — never the
+        # body: the journal is mirrored to the hosted dashboard, and E2E message content must
+        # not leave the domain) so the operator's dashboard shows "a peer told you something"
+        # within one forwarder cycle. The body itself stays readable in the local audit.
+        _security_event(
+            "peer-notification", "info", str(msg.get("from", "?")),
+            f"notification from {msg.get('from', '?')} "
+            f"(id {msg.get('id', '?')}, {len(str(msg.get('body', '')))} chars) — "
+            "body in this domain's audit log",
+            detail={"id": msg.get("id"), "thread_id": msg.get("thread_id")})
         return (json.dumps({
             "coord": "koine/ack/v1", "kind": "ack",
             "id": msg.get("id"), "thread_id": msg.get("thread_id"),
-            "note": "notification received and audited (deterministic ack — no LLM turn "
-                    "was spent; the content is in this domain's audit for its human/agent)",
+            "note": "notification received, audited, and surfaced to this domain's operator "
+                    "(deterministic ack — no LLM turn was spent)",
         }), {"machine_lane": True, "cost_usd": 0.0, "elapsed": 0.0})
     if not isinstance(body, dict):
         return None
